@@ -1,0 +1,6 @@
+build/
+dist/
+.vs/
+*.pdb
+*.user
+*.suo
