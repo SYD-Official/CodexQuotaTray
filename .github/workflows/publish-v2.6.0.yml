@@ -1,0 +1,202 @@
+name: Publish verified v2.6.0 release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [release/publish-v2.6.0]
+    paths:
+      - ".github/workflows/publish-v2.6.0.yml"
+
+permissions: {}
+
+concurrency:
+  group: publish-verified-v2.6.0
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish existing verified Windows build
+    if: github.repository == 'Liuzkai/CodexQuotaTray' && github.ref == 'refs/heads/release/publish-v2.6.0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Verify original artifact, publish release, verify public downloads
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_PROMPT_DISABLED: "1"
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import io
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import time
+          import urllib.request
+          import zipfile
+          
+          REPO = "Liuzkai/CodexQuotaTray"
+          TAG = "v2.6.0"
+          COMMIT = "af0274f364c17bd1db3d6ef5ac0f8c4459583e30"
+          RUN = 38510734331
+          ARTIFACT = 11869627874
+          OUTER_SHA = "b04ddf1046f1d3fab232de7f3851a73a2b7db77001bcb881f4124f53da1d9890"
+          EXE_SHA = "39523fb9fbba85ed54019972423520b75a13fefa2df80edf5b95055f4377d762"
+          ZIP_SHA = "8a2a139716fed8faf55a382dc7c1f3e393df92a1e408d45cbc49d8ef08fd7fc0"
+          NAMES = {
+              "BUILD-NOTES.txt", "BUILDINFO.json", "CodexQuotaTray-v2.6.0-README.txt",
+              "CodexQuotaTray-v2.6.0-Windows.zip", "CodexQuotaTray-v2.6.0.exe",
+              "LICENSE", "SHA256SUMS.txt", "SOURCE_COMMIT.txt", "SOURCE_SHA256SUMS.txt",
+          }
+          BODY = """## CodexQuotaTray v2.6.0 - full-feature fork build
+          
+          This is a community build from Liuzkai/CodexQuotaTray, not an official OpenAI or upstream release.
+          
+          - All 15 original application source files are included, with no application functionality removed.
+          - These are the identical files from the successful [Windows build](https://github.com/Liuzkai/CodexQuotaTray/actions/runs/38510734331). They were not rebuilt for this release.
+          - Source/build commit: af0274f364c17bd1db3d6ef5ac0f8c4459583e30.
+          - Original application source: a89f33f0aa8395d421567f83f7720beb7c08b7d3.
+          - The EXE is unsigned. Compilation, file headers, version resources and checksums were verified; the application and runtime tests were not run. This is not a security guarantee.
+          - Only the static Explorer EXE icon is generic. Runtime tray icons and application UI code are unchanged.
+          - The original manual update feature remains and points to SYD-Official/CodexQuotaTray releases.
+          - This build did not use user Codex sessions, auth.json, credentials or API keys.
+          
+          ### Downloads
+          Use CodexQuotaTray-v2.6.0-Windows.zip for the EXE, instructions, MIT license and build metadata, or download the EXE directly. SHA256SUMS.txt covers the release files.
+          
+          EXE SHA-256: 39523fb9fbba85ed54019972423520b75a13fefa2df80edf5b95055f4377d762
+          
+          ZIP SHA-256: 8a2a139716fed8faf55a382dc7c1f3e393df92a1e408d45cbc49d8ef08fd7fc0
+          
+          <!-- verified-build-run:38510734331;artifact:11869627874 -->
+          """
+          
+          def gh(*args, data=None):
+              p = subprocess.run(["gh", *args], input=data, stdout=subprocess.PIPE, check=True)
+              return p.stdout
+          
+          def api(path, method="GET", payload=None):
+              args = ["api", "--method", method, path]
+              data = None
+              if payload is not None:
+                  args += ["--input", "-"]
+                  data = json.dumps(payload).encode()
+              return json.loads(gh(*args, data=data))
+          
+          def digest(data):
+              return hashlib.sha256(data).hexdigest()
+          
+          assert os.environ["GITHUB_REPOSITORY"] == REPO
+          run = api(f"repos/{REPO}/actions/runs/{RUN}")
+          assert run["conclusion"] == "success" and run["head_sha"] == COMMIT
+          artifact = api(f"repos/{REPO}/actions/artifacts/{ARTIFACT}")
+          assert not artifact["expired"]
+          assert artifact["workflow_run"]["id"] == RUN
+          assert artifact["digest"] == "sha256:" + OUTER_SHA
+          raw = gh("api", f"repos/{REPO}/actions/artifacts/{ARTIFACT}/zip")
+          assert digest(raw) == OUTER_SHA, "Original artifact SHA-256 mismatch"
+          out = Path("release-assets")
+          out.mkdir()
+          with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+              assert archive.testzip() is None
+              assert set(archive.namelist()) == NAMES
+              for name in NAMES:
+                  assert Path(name).name == name
+                  (out / name).write_bytes(archive.read(name))
+          
+          assert digest((out / "CodexQuotaTray-v2.6.0.exe").read_bytes()) == EXE_SHA
+          assert digest((out / "CodexQuotaTray-v2.6.0-Windows.zip").read_bytes()) == ZIP_SHA
+          assert (out / "SOURCE_COMMIT.txt").read_text().strip() == COMMIT
+          info = json.loads((out / "BUILDINFO.json").read_text())
+          assert info["sourceCommit"] == COMMIT and len(info["sourceFiles"]) == 15
+          assert info["executableSha256"] == EXE_SHA
+          for line in (out / "SHA256SUMS.txt").read_text(encoding="utf-8-sig").splitlines():
+              expected, name = line.split("  ", 1)
+              assert name in NAMES and digest((out / name).read_bytes()) == expected
+          with zipfile.ZipFile(out / "CodexQuotaTray-v2.6.0-Windows.zip") as archive:
+              assert archive.testzip() is None
+              assert set(archive.namelist()) == NAMES - {"CodexQuotaTray-v2.6.0-Windows.zip"}
+              for name in archive.namelist():
+                  if name != "SHA256SUMS.txt":
+                      assert archive.read(name) == (out / name).read_bytes()
+          
+          expected_assets = {
+              name: {"sha": digest((out / name).read_bytes()), "size": (out / name).stat().st_size}
+              for name in sorted(NAMES)
+          }
+          refs = api(f"repos/{REPO}/git/matching-refs/tags/{TAG}")
+          for ref in refs:
+              if ref["ref"] == f"refs/tags/{TAG}":
+                  assert ref["object"]["type"] == "commit" and ref["object"]["sha"] == COMMIT, "Existing tag points elsewhere"
+          pages = json.loads(gh("api", "--paginate", "--slurp", f"repos/{REPO}/releases?per_page=100"))
+          matches = [r for page in pages for r in page if r["tag_name"] == TAG]
+          assert len(matches) <= 1
+          if matches:
+              release = matches[0]
+              assert release["target_commitish"] == COMMIT
+              assert release["body"] == BODY and not release["prerelease"], "Existing release is not this verified publication"
+          else:
+              release = api(f"repos/{REPO}/releases", "POST", {
+                  "tag_name": TAG, "target_commitish": COMMIT,
+                  "name": "CodexQuotaTray v2.6.0 (full-feature fork build)",
+                  "body": BODY, "draft": True, "prerelease": False,
+                  "generate_release_notes": False,
+              })
+          release_id = release["id"]
+          assets = api(f"repos/{REPO}/releases/{release_id}/assets?per_page=100")
+          assert len({a["name"] for a in assets}) == len(assets)
+          assert {a["name"] for a in assets} <= NAMES, "Unexpected existing release asset"
+          for asset in assets:
+              expected = expected_assets[asset["name"]]
+              assert asset["state"] == "uploaded"
+              assert asset["size"] == expected["size"]
+              assert asset.get("digest") == "sha256:" + expected["sha"], "Existing asset differs; never overwrite"
+          missing = NAMES - {a["name"] for a in assets}
+          if missing:
+              assert release["draft"], "Never change an already-public release with missing assets"
+              gh("release", "upload", TAG, "--repo", REPO, *[str(out / name) for name in sorted(missing)])
+          assets = api(f"repos/{REPO}/releases/{release_id}/assets?per_page=100")
+          assert {a["name"] for a in assets} == NAMES
+          for asset in assets:
+              expected = expected_assets[asset["name"]]
+              assert asset["state"] == "uploaded"
+              assert asset["size"] == expected["size"]
+              assert asset.get("digest") == "sha256:" + expected["sha"]
+          if release["draft"]:
+              release = api(f"repos/{REPO}/releases/{release_id}", "PATCH", {"draft": False, "make_latest": "true"})
+          release = api(f"repos/{REPO}/releases/tags/{TAG}")
+          assert not release["draft"] and not release["prerelease"]
+          ref = api(f"repos/{REPO}/git/ref/tags/{TAG}")
+          assert ref["object"]["type"] == "commit" and ref["object"]["sha"] == COMMIT
+          
+          # Verify the actual public asset bytes without sending any authentication header.
+          for asset in release["assets"]:
+              expected = expected_assets[asset["name"]]
+              url = asset["browser_download_url"]
+              assert url.startswith(f"https://github.com/{REPO}/releases/download/{TAG}/")
+              deadline = time.monotonic() + 120
+              while True:
+                  try:
+                      with urllib.request.urlopen(url, timeout=30) as response:
+                          downloaded = response.read()
+                      assert digest(downloaded) == expected["sha"], "Public download SHA-256 mismatch"
+                      assert len(downloaded) == expected["size"]
+                      break
+                  except Exception:
+                      if time.monotonic() >= deadline:
+                          raise
+                      time.sleep(5)
+              print(f"VERIFIED {asset['name']} {expected['sha']} {url}")
+          print("RELEASE_URL=" + release["html_url"])
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("Published the original verified Windows build, without recompilation.\n\n")
+              summary.write(release["html_url"] + "\n\n")
+              summary.write("All 9 release asset sizes and SHA-256 hashes were verified again through unauthenticated public downloads.\n")
+          
+          PY

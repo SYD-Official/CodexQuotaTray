@@ -1,0 +1,177 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "app.manifest"
+      - "LICENSE"
+      - "README-delivery-template.txt"
+      - ".github/workflows/build-windows.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Compile full Windows application
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact source revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Compile, verify and package (never launch repository executables)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $root = $env:GITHUB_WORKSPACE
+          $compiler = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          $version = '2.6.0'
+          $name = "CodexQuotaTray-v$version"
+          $package = Join-Path $root 'build\package'
+          $dist = Join-Path $root 'dist'
+          New-Item -ItemType Directory -Force $package, $dist | Out-Null
+          if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
+            throw '.NET Framework C# compiler was not found.'
+          }
+
+          # The application source, manifest and references match the upstream build.
+          # Do not execute build.ps1, IconGenerator, ParserTests, previews or the app.
+          # Only the static Explorer EXE icon is omitted; runtime tray icons are unchanged.
+          $references = @(
+            'System.dll',
+            'System.Core.dll',
+            'System.Drawing.dll',
+            'System.Windows.Forms.dll',
+            'System.Web.Extensions.dll',
+            'C:\Windows\Microsoft.NET\assembly\GAC_MSIL\UIAutomationClient\v4.0_4.0.0.0__31bf3856ad364e35\UIAutomationClient.dll',
+            'C:\Windows\Microsoft.NET\assembly\GAC_MSIL\UIAutomationTypes\v4.0_4.0.0.0__31bf3856ad364e35\UIAutomationTypes.dll',
+            'C:\Windows\Microsoft.NET\assembly\GAC_MSIL\WindowsBase\v4.0_4.0.0.0__31bf3856ad364e35\WindowsBase.dll',
+            'C:\Windows\Microsoft.NET\assembly\GAC_64\PresentationCore\v4.0_4.0.0.0__31bf3856ad364e35\PresentationCore.dll',
+            'C:\Windows\Microsoft.NET\assembly\GAC_MSIL\PresentationFramework\v4.0_4.0.0.0__31bf3856ad364e35\PresentationFramework.dll'
+          )
+          foreach ($reference in $references) {
+            if ([IO.Path]::IsPathRooted($reference) -and -not (Test-Path -LiteralPath $reference -PathType Leaf)) {
+              throw "Missing system reference: $reference"
+            }
+          }
+          $sources = @(Get-ChildItem -LiteralPath (Join-Path $root 'src') -Filter '*.cs' -File | Sort-Object Name)
+          if ($sources.Count -eq 0) { throw 'No application source files were found.' }
+          $exe = Join-Path $package "$name.exe"
+          $arguments = @(
+            '/nologo', '/codepage:65001', '/target:winexe', '/optimize+',
+            ('/win32manifest:' + (Join-Path $root 'app.manifest')),
+            ('/out:' + $exe)
+          )
+          $arguments += @($references | ForEach-Object { '/reference:' + $_ })
+          $arguments += @($sources | ForEach-Object { $_.FullName })
+          & $compiler @arguments
+          if ($LASTEXITCODE -ne 0) { throw "Application compilation failed: $LASTEXITCODE" }
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Compiler did not produce the EXE.' }
+
+          # Read file headers and version resources only. Never load or run app code.
+          $bytes = [IO.File]::ReadAllBytes($exe)
+          if ($bytes.Length -lt 256 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+            throw 'Output does not have a valid DOS executable header.'
+          }
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          if ($peOffset -lt 0 -or $peOffset -gt ($bytes.Length - 94)) { throw 'Invalid PE header offset.' }
+          if ([BitConverter]::ToUInt32($bytes, $peOffset) -ne 0x00004550) { throw 'Output is not a PE executable.' }
+          $subsystem = [BitConverter]::ToUInt16($bytes, $peOffset + 24 + 68)
+          if ($subsystem -ne 2) { throw 'Output is not a Windows GUI executable.' }
+          $fileVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($exe).FileVersion
+          if ($fileVersion -ne "$version.0") { throw "Unexpected executable version: $fileVersion" }
+          $exeHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          Copy-Item -LiteralPath (Join-Path $root 'LICENSE') -Destination $package
+          $readme = Get-Content -LiteralPath (Join-Path $root 'README-delivery-template.txt') -Raw -Encoding UTF8
+          $readme = $readme.Replace('{{VERSION}}', $version).Replace('{{FILE_NAME}}', "$name.exe").Replace('{{FILE_SIZE}}', $bytes.Length.ToString()).Replace('{{SHA256}}', $exeHash)
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          [IO.File]::WriteAllText((Join-Path $package "$name-README.txt"), $readme, $utf8)
+          [IO.File]::WriteAllText((Join-Path $package 'SOURCE_COMMIT.txt'), ($env:GITHUB_SHA + "`r`n"), $utf8)
+
+          $buildInfo = [ordered]@{
+            application = 'CodexQuotaTray'
+            version = $version
+            repository = $env:GITHUB_REPOSITORY
+            sourceCommit = $env:GITHUB_SHA
+            originalSourceCommit = 'a89f33f0aa8395d421567f83f7720beb7c08b7d3'
+            sourceFiles = @($sources | ForEach-Object { 'src/' + $_.Name })
+            applicationSourcesModifiedByBuild = $false
+            compiler = $compiler
+            compilerVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($compiler).FileVersion
+            runnerImage = $env:ImageOS
+            runnerImageVersion = $env:ImageVersion
+            buildTimeUtc = [DateTime]::UtcNow.ToString('o')
+            workflowRun = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            workflowAttempt = $env:GITHUB_RUN_ATTEMPT
+            executableSha256 = $exeHash
+            executableBytes = $bytes.Length
+            verification = 'Compilation, PE GUI header and version resource checks only; no runtime tests.'
+            icon = 'Static Explorer EXE icon omitted to avoid executing IconGenerator. Runtime tray and UI code are unchanged.'
+            signing = 'Unsigned community fork build; not an official OpenAI or upstream release.'
+          }
+          [IO.File]::WriteAllText((Join-Path $package 'BUILDINFO.json'), ($buildInfo | ConvertTo-Json -Depth 5), $utf8)
+          $inputFiles = @($sources.FullName) + @(
+            (Join-Path $root 'app.manifest'),
+            (Join-Path $root '.github\workflows\build-windows.yml')
+          )
+          $sourceHashes = @($inputFiles | ForEach-Object {
+            $relative = $_.Substring($root.Length + 1).Replace('\', '/')
+            (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + $relative
+          })
+          [IO.File]::WriteAllLines((Join-Path $package 'SOURCE_SHA256SUMS.txt'), [string[]]$sourceHashes, $utf8)
+          $notice = @(
+            'Full application source compiled without removing features.',
+            'No repository executable, Codex CLI command, or parser test was run during this build.',
+            'This build did not access user Codex sessions, credentials, auth.json, or API keys.',
+            'Only the static Explorer EXE icon is omitted; runtime tray icons and UI are unchanged.',
+            'The EXE is unsigned. Compilation and checksums are not a security guarantee.',
+            'The original manual update feature remains and targets upstream SYD-Official releases.',
+            'See BUILDINFO.json, SOURCE_COMMIT.txt and checksum files for provenance.'
+          )
+          [IO.File]::WriteAllLines((Join-Path $package 'BUILD-NOTES.txt'), [string[]]$notice, $utf8)
+          $packageHashes = @(Get-ChildItem -LiteralPath $package -File | Sort-Object Name | ForEach-Object {
+            (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + $_.Name
+          })
+          [IO.File]::WriteAllLines((Join-Path $package 'SHA256SUMS.txt'), [string[]]$packageHashes, $utf8)
+          $zip = Join-Path $dist "$name-Windows.zip"
+          Compress-Archive -Path (Join-Path $package '*') -DestinationPath $zip -CompressionLevel Optimal
+          $zipHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          Copy-Item -Path (Join-Path $package '*') -Destination $dist
+          Add-Content -LiteralPath (Join-Path $dist 'SHA256SUMS.txt') -Value ($zipHash + '  ' + [IO.Path]::GetFileName($zip)) -Encoding UTF8
+          Write-Host "SOURCE_COMMIT=$env:GITHUB_SHA"
+          Write-Host "EXE_SHA256=$exeHash"
+          Write-Host "ZIP_SHA256=$zipHash"
+          @(
+            "### Windows build v$version",
+            "",
+            "Source commit: $env:GITHUB_SHA",
+            "",
+            "EXE SHA-256: $exeHash",
+            "",
+            "ZIP SHA-256: $zipHash",
+            "",
+            'All application features preserved. Compile-only verification; app and tests were not executed.',
+            'Unsigned build. Static Explorer file icon omitted; runtime tray icons are unchanged.'
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+      - name: Upload EXE, ZIP, license and provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: CodexQuotaTray-v2.6.0-Windows
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
