@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -7,10 +8,10 @@ namespace CodexQuotaTray
 {
     /// <summary>
     /// 前台窗口全屏检测 —— 仅用于决定任务栏额度小窗(Overlay)是否需要临时隐藏。
-    /// 判定:前台窗口完整覆盖「悬浮窗所在显示器」的整屏矩形,且不处于最大化状态。
-    /// 本机实测数据(1920x1080,任务栏 48px):
-    ///  - 浏览器全屏 / 视频全屏 / UE 游戏全屏: rect=(0,0,1920,1080), isZoomed=False → 判定全屏;
-    ///  - 普通最大化窗口: rect=(-8,-8,1928,1040)(下缘差一个任务栏高度), isZoomed=True → 判定非全屏。
+    /// 判定:前台窗口覆盖「悬浮窗所在显示器」的整屏矩形。
+    /// 最大化状态的窗口还需移除普通标题栏和可调整边框:
+    /// Chrome 视频全屏可能保留 IsZoomed/showCmd/WS_MAXIMIZE,不能单凭它们排除全屏。
+    /// 普通带边框最大化窗口(包括任务栏自动隐藏时)保持数字条显示。
     /// 全程容错:任何异常/拿不准的情况都返回 false(宁可保持显示,绝不误隐藏)。
     /// </summary>
     internal static class FullscreenDetector
@@ -19,6 +20,8 @@ namespace CodexQuotaTray
         private const int GwlStyle = -16;
         private const int SwShowMaximized = 3;
         private const long WsMaximize = 0x01000000L;
+        private const long WsCaption = 0x00C00000L;
+        private const long WsThickFrame = 0x00040000L;
         private const int CoversTolerance = 3;
 
         [StructLayout(LayoutKind.Sequential)]
@@ -124,21 +127,21 @@ namespace CodexQuotaTray
             var info = new MonitorInfo { cbSize = Marshal.SizeOf(typeof(MonitorInfo)) };
             if (!GetMonitorInfo(monitor, ref info)) return false;
 
-            if (!Covers(bounds, info.rcMonitor, CoversTolerance)) return false;
-
-            // 最大化窗口不算全屏:任务栏自动隐藏等场景下最大化窗口可能铺满整屏,
-            // 此时按用户要求优先保持 Overlay 显示,避免误隐藏普通桌面应用。
-            if (IsMaximizedState(foreground)) return false;
-
-            return true;
+            return ShouldHideOverlay(
+                Rectangle.FromLTRB(bounds.Left, bounds.Top, bounds.Right, bounds.Bottom),
+                Rectangle.FromLTRB(info.rcMonitor.Left, info.rcMonitor.Top, info.rcMonitor.Right, info.rcMonitor.Bottom),
+                IsMaximizedState(foreground), GetWindowLongStyle(foreground));
         }
 
-        private static bool Covers(NativeRect candidate, NativeRect target, int tolerance)
+        internal static bool ShouldHideOverlay(Rectangle candidate, Rectangle target, bool isMaximized, long style)
         {
-            return candidate.Left <= target.Left + tolerance
-                && candidate.Top <= target.Top + tolerance
-                && candidate.Right >= target.Right - tolerance
-                && candidate.Bottom >= target.Bottom - tolerance;
+            return candidate.Width > 0 && candidate.Height > 0
+                && target.Width > 0 && target.Height > 0
+                && candidate.Left <= target.Left + CoversTolerance
+                && candidate.Top <= target.Top + CoversTolerance
+                && candidate.Right >= target.Right - CoversTolerance
+                && candidate.Bottom >= target.Bottom - CoversTolerance
+                && (!isMaximized || (style & (WsCaption | WsThickFrame)) == 0);
         }
 
         private static bool IsMaximizedState(IntPtr window)

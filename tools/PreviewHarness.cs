@@ -249,7 +249,7 @@ internal static class PreviewHarness
             {
                 form.ApplySettings(new AppSettings { AppearanceMode = "dark", Language = "zh" });
                 form.ShowPreviewPage(2);
-                form.SetUpdateStatus("当前已是最新版本 v2.6.2", "You are up to date · v2.6.2", false);
+                form.SetUpdateStatus("当前已是最新版本 v2.6.3", "You are up to date · v2.6.3", false);
                 form.SetPreviewHint(0);
                 SaveForm(form, args[16]);
             }

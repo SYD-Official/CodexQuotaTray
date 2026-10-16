@@ -12,6 +12,35 @@ internal static class ParserTests
 {
     private static int Main(string[] args)
     {
+        var monitorBounds = new Rectangle(0, 0, 1920, 1080);
+        // Chrome + Bilibili player fullscreen, captured on 2026-10-16:
+        // rect=(0,0,1920,1080), IsZoomed=True, showCmd=3, style=0x170B0000.
+        Assert(FullscreenDetector.ShouldHideOverlay(monitorBounds, monitorBounds, true, 0x170B0000L),
+            "Chrome 视频全屏即使保留最大化标志也应隐藏数字条");
+        Assert(FullscreenDetector.ShouldHideOverlay(monitorBounds, monitorBounds, false, 0x1E0B0000L),
+            "非最大化的无边框全屏应继续隐藏数字条");
+        Assert(!FullscreenDetector.ShouldHideOverlay(new Rectangle(-8, -8, 1936, 1048), monitorBounds, true, 0x17CF0000L),
+            "仅覆盖工作区的普通最大化窗口不应隐藏数字条");
+        Assert(!FullscreenDetector.ShouldHideOverlay(monitorBounds, monitorBounds, true, 0x17CF0000L),
+            "任务栏自动隐藏时带普通窗口边框的最大化窗口仍应显示数字条");
+        Assert(!FullscreenDetector.ShouldHideOverlay(monitorBounds, monitorBounds, true, 0x00C00000L),
+            "最大化窗口保留标题栏时不应误判为视频全屏");
+        Assert(!FullscreenDetector.ShouldHideOverlay(monitorBounds, monitorBounds, true, 0x00040000L),
+            "最大化窗口保留可调整边框时不应误判为视频全屏");
+        Assert(!FullscreenDetector.ShouldHideOverlay(new Rectangle(300, 200, 1000, 600), monitorBounds, false, 0x170B0000L),
+            "非全屏无边框窗口不应隐藏数字条");
+        Assert(!FullscreenDetector.ShouldHideOverlay(new Rectangle(1920, 0, 1920, 1080), monitorBounds, true, 0x170B0000L),
+            "其它显示器全屏不应隐藏本屏数字条");
+        Assert(FullscreenDetector.ShouldHideOverlay(new Rectangle(-1920, 0, 1920, 1080), new Rectangle(-1920, 0, 1920, 1080), true, 0x170B0000L),
+            "负坐标显示器上的视频全屏应正确识别");
+        Assert(FullscreenDetector.ShouldHideOverlay(new Rectangle(3, 3, 1914, 1074), monitorBounds, true, 0x170B0000L),
+            "全屏边界应保留三像素容差");
+        Assert(!FullscreenDetector.ShouldHideOverlay(new Rectangle(4, 0, 1916, 1080), monitorBounds, true, 0x170B0000L),
+            "超过边界容差的窗口不应识别为全屏");
+        Assert(!FullscreenDetector.ShouldHideOverlay(Rectangle.Empty, monitorBounds, false, 0),
+            "空窗口边界不应识别为全屏");
+        Assert(!FullscreenDetector.ShouldHideOverlay(monitorBounds, Rectangle.Empty, false, 0),
+            "无效显示器边界不应识别为全屏");
         var defaults = new AppSettings();
         Assert(defaults.GlassEnabled && defaults.GlassOpacityPercent == 40,
             "柔光玻璃应默认开启且不透明度为 40%");
