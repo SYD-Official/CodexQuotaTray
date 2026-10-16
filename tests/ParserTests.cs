@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -16,6 +17,7 @@ internal static class ParserTests
             "柔光玻璃应默认开启且不透明度为 40%");
         Assert(defaults.QuotaPrimaryEmphasis, "额度详情应默认使用主次布局");
         Assert(!defaults.CompletionReminderEnabled, "任务完成闪烁提醒应默认关闭");
+        Assert(!defaults.AihotBlinkEnabled, "AIHOT 新通知闪烁提醒应默认关闭");
         Assert(!QuotaUsageMath.IsConsumptionFast(83, 92), "额度剩余 83%、时间剩余 92% 应处于启动缓冲内");
         Assert(!QuotaUsageMath.IsConsumptionFast(70, 90), "额度消耗恰好超前 20 个百分点时仍应视为正常");
         Assert(QuotaUsageMath.IsConsumptionFast(69, 90), "额度消耗超前超过 20 个百分点时应提示偏快");
@@ -139,6 +141,159 @@ internal static class ParserTests
                 "应拒绝不匹配的 SHA-256 文件校验");
         }
         finally { File.Delete(digestFixture); }
+
+        const string aihotFixture = "{\"schemaVersion\":1,\"timezone\":\"Asia/Shanghai\",\"count\":2,\"checkedAt\":\"2026-10-16T12:30:42.274+08:00\",\"monitor\":{\"status\":\"normal\",\"pendingCount\":1},\"outage\":null,\"events\":[{\"id\":\"reset-a\",\"type\":\"direct_reset\",\"displayLabel\":\"重置（形式未明确）\",\"status\":\"confirmed\",\"title\":\"Tibo 确认重置\",\"confirmedAt\":\"2026-10-15T12:55:51.000+08:00\",\"updatedAt\":\"2026-10-15T12:55:51.000+08:00\",\"unexpectedFutureField\":123,\"posts\":[{\"stage\":\"确认完成\",\"publishedAt\":\"2026-10-15T14:28:13.000+08:00\",\"text\":\"搞定收工\",\"url\":\"https://x.com/thsottiaux/status/1\"}]},{\"id\":\"reset-b\",\"type\":\"direct_reset\",\"displayLabel\":\"预告\",\"status\":\"predicted\",\"title\":\"即将重置\",\"createdAt\":\"2026-10-16T09:00:00.000+08:00\",\"schedule\":{\"precision\":\"deadline\",\"label\":\"北京时间预计 10月16日 15:00 前\"},\"posts\":[{\"stage\":\"预告\",\"text\":\"全球重置今天落地\",\"url\":\"https://x.com/thsottiaux/status/2\"}]}]}";
+        var aihotResets = AihotService.ParseResetsJson(aihotFixture);
+        Assert(aihotResets != null, "应能解析 AIHOT codex-resets 响应");
+        Assert(aihotResets.EventCount == 2 && aihotResets.Events.Count == 2, "应解析事件总数");
+        Assert(!aihotResets.Events[0].IsPending && aihotResets.Events[1].IsPending, "应区分已确认与预告事件");
+        Assert(aihotResets.Events[0].DisplayLabel == "重置（形式未明确）", "应保留类型标签");
+        Assert(aihotResets.Events[0].TimeText == "10-15 12:55", "应格式化确认时间");
+        Assert(aihotResets.Events[1].TimeText == "10-16 09:00", "预告事件缺少确认时间时应回退使用创建时间");
+        Assert(aihotResets.Events[1].ScheduleText == "北京时间预计 10月16日 15:00 前", "应保留预告时间文案");
+        Assert(aihotResets.Events[0].SummaryText == "搞定收工" && aihotResets.Events[0].PrimaryUrl == "https://x.com/thsottiaux/status/1",
+            "应提取帖子摘要与原帖链接");
+        Assert(aihotResets.DataCheckedAtText == "10-16 12:30", "应格式化数据校验时间");
+        Assert(aihotResets.PendingCount == 1, "应读取尚未落地的预告数量");
+        Assert(AihotService.ParseResetsJson("this is not json") == null, "非法 JSON 应返回 null 而不是抛异常");
+        Assert(AihotService.ParseResetsJson("") == null, "空字符串应返回 null");
+        Assert(AihotService.ParseResetsJson("{\"events\":[]}") != null, "空事件列表应可解析");
+        Assert(AihotService.ParseResetsJson("{\"events\":[{}]}") != null, "缺少字段的事件应容错解析");
+        Assert(AihotService.FormatApiTime("2026-10-15T12:55:51.000+08:00") == "10-15 12:55", "时间格式应符合显示口径");
+        Assert(AihotService.FormatApiTime("2026-10-15") == "10-15" && AihotService.FormatApiTime(null) == null, "日期与空值应正确处理");
+
+        // ---- AIHOT 新通知:稳定 fingerprint / 差异检测 / 已见库 / 闪烁状态机 ----
+
+        Func<AihotResetsSnapshot, string[]> toFingerprints = delegate(AihotResetsSnapshot resets)
+        {
+            var list = new List<string>();
+            foreach (var item in resets.Events)
+            {
+                var fingerprint = AihotService.ComputeFingerprint(item);
+                if (fingerprint != null) list.Add(fingerprint);
+            }
+            list.Sort(StringComparer.Ordinal);
+            return list.ToArray();
+        };
+        Func<string[], string[], bool> sameFingerprints = delegate(string[] left, string[] right)
+        {
+            if (left.Length != right.Length) return false;
+            for (var index = 0; index < left.Length; index++)
+            {
+                if (!string.Equals(left[index], right[index], StringComparison.Ordinal)) return false;
+            }
+            return true;
+        };
+        Func<string, string> wrapNotificationEvent = delegate(string eventBody)
+        {
+            return "{\"schemaVersion\":1,\"checkedAt\":\"2026-10-16T12:30:42.274+08:00\",\"monitor\":{\"pendingCount\":0,\"status\":\"normal\"},\"events\":[" + eventBody + "]}";
+        };
+
+        const string notifyEvent = "{\"id\":\"reset-x\",\"type\":\"direct_reset\",\"displayLabel\":\"预告\",\"status\":\"predicted\",\"title\":\"即将重置\",\"createdAt\":\"2026-10-16T09:00:00.000+08:00\",\"updatedAt\":\"2026-10-16T09:00:00.000+08:00\",\"schedule\":{\"precision\":\"deadline\",\"from\":\"2026-10-16T15:00:00.000+08:00\",\"through\":\"2026-10-16T15:00:00.000+08:00\",\"label\":\"北京时间预计 10月16日 15:00 前\"},\"posts\":[{\"id\":\"post-2\",\"stage\":\"预告\",\"text\":\"全球重置今天落地\",\"url\":\"https://x.com/thsottiaux/status/2\"}]}";
+        var notifyFingerprints = toFingerprints(AihotService.ParseResetsJson(wrapNotificationEvent(notifyEvent)));
+        Assert(notifyFingerprints.Length == 1, "单事件响应应产生一条指纹");
+        Assert(sameFingerprints(notifyFingerprints, toFingerprints(AihotService.ParseResetsJson(wrapNotificationEvent(notifyEvent)))),
+            "同一响应二次解析的指纹必须完全一致");
+
+        const string notifyEventNonSubstantive = "{\"posts\":[{\"url\":\"https://x.com/thsottiaux/status/2\",\"text\":\"全球重置今天落地\",\"stage\":\"预告\",\"id\":\"post-2\"}],\"title\":\"即将重置\",\"status\":\"predicted\",\"displayLabel\":\"预告\",\"type\":\"direct_reset\",\"id\":\"reset-x\",\"updatedAt\":\"2026-10-16T23:59:59.000+08:00\",\"createdAt\":\"2026-10-16T09:00:00.000+08:00\",\"schedule\":{\"label\":\"北京时间预计 10月16日 15:00 前\",\"through\":\"2026-10-16T15:00:00.000+08:00\",\"from\":\"2026-10-16T15:00:00.000+08:00\",\"precision\":\"deadline\"}}";
+        const string nonSubstantiveJson = "{\"checkedAt\":\"2026-10-17T01:00:00.000+08:00\",\"today\":\"2026-10-17\",\"monitor\":{\"status\":\"attention\",\"pendingCount\":7},\"events\":[" + notifyEventNonSubstantive + "]}";
+        Assert(sameFingerprints(notifyFingerprints, toFingerprints(AihotService.ParseResetsJson(nonSubstantiveJson))),
+            "checkedAt、updatedAt、字段顺序、JSON 键顺序变化不应改变指纹");
+
+        var statusChangedFingerprints = toFingerprints(AihotService.ParseResetsJson(
+            wrapNotificationEvent(notifyEvent.Replace("\"status\":\"predicted\"", "\"status\":\"confirmed\""))));
+        Assert(!sameFingerprints(notifyFingerprints, statusChangedFingerprints), "状态变化应改变指纹(触发提醒)");
+        var scheduleChangedFingerprints = toFingerprints(AihotService.ParseResetsJson(
+            wrapNotificationEvent(notifyEvent.Replace("2026-10-16T15:00:00.000+08:00", "2026-10-16T18:00:00.000+08:00"))));
+        Assert(!sameFingerprints(notifyFingerprints, scheduleChangedFingerprints), "时间安排变化应改变指纹(触发提醒)");
+        var postAddedFingerprints = toFingerprints(AihotService.ParseResetsJson(
+            wrapNotificationEvent(notifyEvent.Replace("status/2\"}]}", "status/2\"},{\"id\":\"post-3\",\"stage\":\"进展\",\"text\":\"落地中\",\"url\":\"https://x.com/thsottiaux/status/3\"}]}"))));
+        Assert(!sameFingerprints(notifyFingerprints, postAddedFingerprints), "新增帖子应改变指纹(触发提醒)");
+
+        const string twoPostEvent = "{\"id\":\"reset-y\",\"type\":\"direct_reset\",\"status\":\"confirmed\",\"title\":\"双重击\",\"posts\":[{\"id\":\"p1\",\"stage\":\"a\",\"text\":\"一\"},{\"id\":\"p2\",\"stage\":\"b\",\"text\":\"二\"}]}";
+        const string twoPostEventReversed = "{\"id\":\"reset-y\",\"type\":\"direct_reset\",\"status\":\"confirmed\",\"title\":\"双重击\",\"posts\":[{\"id\":\"p2\",\"stage\":\"b\",\"text\":\"二\"},{\"id\":\"p1\",\"stage\":\"a\",\"text\":\"一\"}]}";
+        Assert(sameFingerprints(
+                toFingerprints(AihotService.ParseResetsJson(wrapNotificationEvent(twoPostEvent))),
+                toFingerprints(AihotService.ParseResetsJson(wrapNotificationEvent(twoPostEventReversed)))),
+            "posts 数组顺序变化不应改变指纹");
+
+        var mergedEventFingerprints = toFingerprints(AihotService.ParseResetsJson(
+            "{\"checkedAt\":\"2026-10-16T13:00:00.000+08:00\",\"events\":[" + twoPostEvent + "," + notifyEvent + "]}"));
+        Assert(mergedEventFingerprints.Length == 2, "两个事件应产生两条指纹");
+
+        // 已见库:冷启动 / 去重 / 持久化 / 上限裁剪
+        var seenTempDirectory = Path.Combine(Path.GetTempPath(), "CodexMeterSeen-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(seenTempDirectory);
+        try
+        {
+            var seenPath = Path.Combine(seenTempDirectory, "aihot-seen-v1.txt");
+            var missingStore = new AihotSeenStore(seenPath);
+            missingStore.Load();
+            Assert(!missingStore.FileExistedAtLoad && missingStore.Count == 0, "已见库文件缺失应视为冷启动");
+
+            var seenStore = new AihotSeenStore(seenPath);
+            seenStore.Load();
+            Assert(seenStore.Add(notifyFingerprints[0]), "首次加入的指纹应视为新通知");
+            Assert(!seenStore.Add(notifyFingerprints[0]), "重复加入同一指纹不应再次视为新通知");
+            Assert(seenStore.Add(postAddedFingerprints[0]) && seenStore.Count == 2, "实质变化后的新指纹应视为新通知");
+            seenStore.Save();
+
+            var reloadedStore = new AihotSeenStore(seenPath);
+            reloadedStore.Load();
+            Assert(reloadedStore.FileExistedAtLoad && reloadedStore.Contains(notifyFingerprints[0]) && reloadedStore.Contains(postAddedFingerprints[0]),
+                "已见库应持久化,重启后仍命中同一指纹");
+            Assert(!reloadedStore.Add(notifyFingerprints[0]), "重启后同一事件不应重复提醒");
+            for (var index = 0; index < AihotSeenStore.MaxEntries + 5; index++) reloadedStore.Add("trim-" + index);
+            Assert(reloadedStore.Count == AihotSeenStore.MaxEntries, "已见库应裁剪到上限");
+            Assert(!reloadedStore.Contains("trim-0") && reloadedStore.Contains("trim-" + (AihotSeenStore.MaxEntries + 4)),
+                "裁剪应移除最旧条目、保留最新条目");
+        }
+        finally { Directory.Delete(seenTempDirectory, true); }
+
+        // 闪烁状态机:开关 / 固定脉冲 / 全屏抑制与补闪 / 打断不重排
+        var highlightLog = new List<bool>();
+        var blink = new AihotBlinkController(delegate(bool highlighted) { highlightLog.Add(highlighted); });
+
+        blink.NotifyNewEvents();
+        Assert(!blink.IsBlinking && highlightLog.Count == 0, "开关关闭时新通知不应闪烁");
+
+        blink.SetEnabled(true);
+        blink.NotifyNewEvents();
+        Assert(blink.IsBlinking && highlightLog.Count == 1 && highlightLog[0], "开启后新通知应立即开始闪烁");
+        for (var index = 0; index < AihotBlinkController.PulseCount * 2 - 1; index++) blink.Tick();
+        Assert(blink.IsBlinking, "脉冲未走完时应保持闪烁");
+        blink.Tick();
+        Assert(!blink.IsBlinking, "闪烁应在限定周期后自动停止");
+        Assert(!highlightLog[highlightLog.Count - 1], "停止时应关闭高亮");
+        var pulseCount = 0;
+        foreach (var value in highlightLog) { if (value) pulseCount++; }
+        Assert(pulseCount == AihotBlinkController.PulseCount, "应为固定次数脉冲,绝不永久闪烁");
+        var callsAfterStop = highlightLog.Count;
+        blink.Tick();
+        Assert(highlightLog.Count == callsAfterStop, "停止后 Tick 不应产生额外高亮");
+
+        highlightLog.Clear();
+        blink.SetSuppressed(true);
+        blink.NotifyNewEvents();
+        Assert(!blink.IsBlinking && highlightLog.Count == 0 && blink.HasPending, "全屏期间新通知不应闪烁,只记录待提醒");
+        blink.SetSuppressed(false);
+        Assert(blink.IsBlinking && highlightLog.Count == 1 && highlightLog[0], "退出全屏后应补闪一次");
+        for (var index = 0; index < AihotBlinkController.PulseCount * 2; index++) blink.Tick();
+        Assert(!blink.IsBlinking && !blink.HasPending, "补闪结束后待提醒应清除");
+
+        highlightLog.Clear();
+        blink.NotifyNewEvents();
+        blink.Tick();
+        blink.Tick();
+        blink.SetSuppressed(true);
+        Assert(!blink.IsBlinking && !highlightLog[highlightLog.Count - 1], "闪烁进行中进入全屏应立即停止并关闭高亮");
+        var callsAtSuppress = highlightLog.Count;
+        blink.SetSuppressed(false);
+        Assert(highlightLog.Count == callsAtSuppress && !blink.IsBlinking, "被全屏打断的闪烁不应重新排队");
+
+        blink.NotifyNewEvents();
+        blink.SetEnabled(false);
+        Assert(!blink.IsBlinking && !blink.HasPending, "关闭开关应立即停止闪烁并清除待提醒");
 
         var firstReset = DateTimeOffset.Parse("2026-08-16T12:00:00Z");
         var nextReset = firstReset.AddDays(7);

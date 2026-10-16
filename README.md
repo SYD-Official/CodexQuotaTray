@@ -5,7 +5,7 @@
 ## 使用方法
 
 1. 先启动 Codex 桌面应用。
-2. 双击最新的版本化 EXE，例如 `CodexQuotaTray-v2.6.0.exe`。
+2. 双击最新的版本化 EXE，例如 `CodexQuotaTray-v2.6.2.exe`。
 3. 点击任务栏数字条或右下角托盘图标查看详情；右键可以刷新或退出。
 
 本工具不会替你启动、登录或控制 Codex。Codex 运行时，程序通过已安装的 Codex 只读接口获取当前额度；Codex 没有运行时，数字条显示离线。
@@ -71,7 +71,7 @@ Windows 没有向普通应用开放常驻任务栏文字槽，因此数字条仍
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-生成文件使用版本化名称，例如 `dist\CodexQuotaTray-v2.6.0.exe`，并同时生成配套的完整 TXT 使用说明；构建新版不会覆盖旧版文件。项目使用 Windows 自带的 .NET Framework 4.8 编译器，不需要安装 Visual Studio 或 .NET SDK。
+生成文件使用版本化名称，例如 `dist\CodexQuotaTray-v2.6.2.exe`，并同时生成配套的完整 TXT 使用说明；构建新版不会覆盖旧版文件。项目使用 Windows 自带的 .NET Framework 4.8 编译器，不需要安装 Visual Studio 或 .NET SDK。
 
 作者：渡缘笙SYD · [Bilibili](https://space.bilibili.com/1266346466) · [GitHub](https://github.com/SYD-Official/CodexQuotaTray)
 

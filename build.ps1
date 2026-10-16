@@ -4,7 +4,7 @@ $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $compiler = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $buildDirectory = Join-Path $projectRoot 'build'
 $distributionDirectory = Join-Path $projectRoot 'dist'
-$appVersion = '2.6.0'
+$appVersion = '2.6.2'
 $outputName = "CodexQuotaTray-v$appVersion.exe"
 $readmeOutputName = "CodexQuotaTray-v$appVersion-README.txt"
 $iconPath = Join-Path $buildDirectory 'CodexQuotaTray.ico'
@@ -40,6 +40,8 @@ $testSources = @(
     "$projectRoot\src\SessionQuotaReader.cs",
     "$projectRoot\src\RingIconFactory.cs",
     "$projectRoot\src\UpdateService.cs",
+    "$projectRoot\src\AihotService.cs",
+    "$projectRoot\src\AihotBlinkController.cs",
     "$projectRoot\src\ThemePalette.cs",
     "$projectRoot\tests\ParserTests.cs"
 )
@@ -53,6 +55,7 @@ $previewSources = @(
     "$projectRoot\src\AppSettings.cs",
     "$projectRoot\src\Models.cs",
     "$projectRoot\src\SessionQuotaReader.cs",
+    "$projectRoot\src\AihotService.cs",
     "$projectRoot\src\UpdateService.cs",
     "$projectRoot\src\ThemePalette.cs",
     "$projectRoot\src\RingIconFactory.cs",

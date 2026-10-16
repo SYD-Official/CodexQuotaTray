@@ -61,6 +61,8 @@ namespace CodexQuotaTray
         private DateTimeOffset? _fiveHourResetsAt;
         private bool _hasWeeklyWindow;
         private bool _active;
+        private bool _overlaySuppressed;
+        private bool _blinkHighlight;
         private float _dpiScale = 1f;
         private AppSettings _settings = new AppSettings();
         private ThemePalette _palette;
@@ -134,6 +136,7 @@ namespace CodexQuotaTray
         {
             if (visible)
             {
+                if (_overlaySuppressed) return;
                 EnsureTaskbarAttachment();
                 if (!Visible) Show();
                 EnsureOnTop();
@@ -144,8 +147,34 @@ namespace CodexQuotaTray
             }
         }
 
+        /// <summary>
+        /// 全屏抑制闸门:置位后悬浮窗保持隐藏,期间任何 Show/Reposition 路径都不会重新显示它
+        /// (守护定时器、后台额度刷新等触发的 EnsureOnTop/Reposition 全部被拦截)。
+        /// 解除抑制不在此处恢复显示,由守护定时器同一 tick 内的 EnsureOnTop 统一恢复。
+        /// </summary>
+        public void SetOverlaySuppressed(bool suppressed)
+        {
+            if (_overlaySuppressed == suppressed) return;
+            _overlaySuppressed = suppressed;
+            if (suppressed)
+            {
+                try { if (Visible) Hide(); }
+                catch { }
+            }
+        }
+
+        /// <summary>AIHOT 新通知闪烁高亮(只改边框与底色,不改数字内容)。</summary>
+        public void SetBlinkHighlight(bool highlighted)
+        {
+            if (_blinkHighlight == highlighted) return;
+            _blinkHighlight = highlighted;
+            try { Invalidate(); }
+            catch { }
+        }
+
         public void EnsureOnTop()
         {
+            if (_overlaySuppressed) return;
             if (!EnsureTaskbarAttachment()) return;
             if (!Visible) Show();
             Reposition(true);
@@ -205,6 +234,7 @@ namespace CodexQuotaTray
 
         public void Reposition(bool forceZOrder = false)
         {
+            if (_overlaySuppressed) return;
             var taskbar = FindWindow("Shell_TrayWnd", null);
             NativeRect taskbarBounds;
             if (taskbar == IntPtr.Zero || !GetWindowRect(taskbar, out taskbarBounds))
@@ -486,11 +516,29 @@ namespace CodexQuotaTray
             var baseWidth = GetBaseWidth();
             var backgroundColor = _hovered ? Blend(_palette.Background, _palette.Primary, _palette.IsLight ? 0.06f : 0.09f) : _palette.Background;
             var borderColor = _hovered ? Blend(_palette.Divider, _palette.Primary, 0.45f) : _palette.Divider;
-            using (var background = new SolidBrush(backgroundColor))
-            using (var border = new Pen(borderColor))
+            if (_blinkHighlight)
             {
-                graphics.FillRoundedRectangle(background, new Rectangle(0, 0, baseWidth - 1, BaseHeight - 1), 8);
-                graphics.DrawRoundedRectangle(border, new Rectangle(0, 0, baseWidth - 1, BaseHeight - 1), 8);
+                backgroundColor = Blend(backgroundColor, _palette.Primary, _palette.IsLight ? 0.14f : 0.20f);
+                borderColor = _palette.Primary;
+            }
+            var fillBounds = new Rectangle(0, 0, baseWidth - 1, BaseHeight - 1);
+            using (var background = new SolidBrush(backgroundColor))
+            {
+                graphics.FillRoundedRectangle(background, fillBounds, 8);
+            }
+            if (_blinkHighlight)
+            {
+                using (var border = new Pen(borderColor, 2f))
+                {
+                    graphics.DrawRoundedRectangle(border, new Rectangle(1, 1, baseWidth - 3, BaseHeight - 3), 7);
+                }
+            }
+            else
+            {
+                using (var border = new Pen(borderColor))
+                {
+                    graphics.DrawRoundedRectangle(border, fillBounds, 8);
+                }
             }
 
             using (var trackPen = new Pen(_palette.Track, 3f))

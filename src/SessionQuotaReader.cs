@@ -371,7 +371,7 @@ namespace CodexQuotaTray
                     {
                         process.StandardError.ReadToEndAsync();
                         process.StandardInput.AutoFlush = true;
-                        process.StandardInput.WriteLine("{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"codex-quota-tray\",\"version\":\"2.6.0\"},\"capabilities\":{}}}");
+                        process.StandardInput.WriteLine("{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"codex-quota-tray\",\"version\":\"2.6.2\"},\"capabilities\":{}}}");
                         if (ReadAppServerResponse(process, 1, 2500) == null) return null;
 
                         process.StandardInput.WriteLine("{\"id\":2,\"method\":\"account/rateLimits/read\",\"params\":{\"excludeResetCreditDetails\":true,\"supportsLunaReserve\":true}}");
