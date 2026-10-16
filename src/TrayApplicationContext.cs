@@ -13,16 +13,26 @@ namespace CodexQuotaTray
         private const int CompletionFlashIntervalMilliseconds = 600;
         private readonly SessionQuotaReader _reader;
         private readonly CodexCompletionMonitor _completionMonitor;
+        private readonly AihotService _aihotService;
+        private AihotResetsForm _aihotForm;
         private readonly NotifyIcon _notifyIcon;
         private readonly QuotaPopupForm _popup;
         private readonly TaskbarWidgetForm _widget;
         private readonly Timer _refreshTimer;
         private readonly Timer _widgetGuardTimer;
+        private readonly Timer _anchorRefreshTimer;
+        private readonly DesktopWindowWatcher _desktopWatcher;
+        private DateTime _lastAnchorRefreshUtc;
         private readonly Timer _notificationTimer;
         private readonly Timer _completionFlashTimer;
+        private readonly Timer _aihotBlinkTimer;
+        private readonly AihotBlinkController _aihotBlink;
         private readonly ToolStripMenuItem _showMenuItem;
         private readonly ToolStripMenuItem _refreshMenuItem;
         private readonly ToolStripMenuItem _exitMenuItem;
+        private readonly ToolStripMenuItem _aihotMenuItem;
+        private readonly ToolStripMenuItem _aihotBlinkMenuItem;
+        private readonly ToolStripMenuItem _resetWidgetPositionMenuItem;
         private readonly AppSettings _settings;
         private Icon _currentIcon;
         private Rectangle _lastTrayAnchor;
@@ -33,6 +43,7 @@ namespace CodexQuotaTray
         private bool _completionMonitorEnabled;
         private bool _hasCompletionUnread;
         private bool _completionFlashPhase;
+        private bool _overlaySuppressedByFullscreen;
         private int _completionUnreadCount;
         private int _refreshBusy;
 
@@ -43,8 +54,11 @@ namespace CodexQuotaTray
             _lastSystemLanguage = AppSettings.SystemLanguageName();
             _reader = new SessionQuotaReader();
             _completionMonitor = new CodexCompletionMonitor();
+            _aihotService = new AihotService();
+            _aihotService.Start();
 
             _popup = new QuotaPopupForm();
+            _popup.AttachAihotService(_aihotService);
             _popup.ApplySettings(_settings);
             _popup.RefreshRequested += delegate { RefreshInBackground(); };
             _popup.ExitRequested += delegate { ExitThread(); };
@@ -53,18 +67,42 @@ namespace CodexQuotaTray
 
             _widget = new TaskbarWidgetForm();
             _widget.ApplySettings(_settings);
+            _widget.ManualPositionChanged += delegate { ApplySettingsChange(); };
             _lastTrayAnchor = new Rectangle(Cursor.Position.X - 1, Cursor.Position.Y - 1, 3, 3);
             _widget.Click += delegate { AcknowledgeCompletionReminder(); TogglePopup(_widget.GetAnchorBounds()); };
+
+            _aihotBlink = new AihotBlinkController(delegate(bool highlighted) { _widget.SetBlinkHighlight(highlighted); });
+            _aihotBlink.SetEnabled(_settings.AihotBlinkEnabled);
+            _aihotService.NewResetsDetected += OnAihotNewResetsDetected;
 
             var menu = new ContextMenuStrip();
             _showMenuItem = new ToolStripMenuItem();
             _showMenuItem.Click += delegate { TogglePopup(_lastTrayAnchor); };
             _refreshMenuItem = new ToolStripMenuItem();
             _refreshMenuItem.Click += delegate { RefreshInBackground(); };
+            _aihotMenuItem = new ToolStripMenuItem();
+            _aihotMenuItem.Click += delegate { ShowAihotWindow(); };
+            _aihotBlinkMenuItem = new ToolStripMenuItem();
+            _aihotBlinkMenuItem.Click += delegate
+            {
+                _settings.AihotBlinkEnabled = !_settings.AihotBlinkEnabled;
+                ApplySettingsChange();
+            };
             _exitMenuItem = new ToolStripMenuItem();
+            _resetWidgetPositionMenuItem = new ToolStripMenuItem();
+            _resetWidgetPositionMenuItem.Click += delegate
+            {
+                _settings.WidgetManualPosition = false;
+                _settings.WidgetPositionRatio = 0.5;
+                ApplySettingsChange();
+                _widget.RefreshDynamicAnchor();
+            };
             _exitMenuItem.Click += delegate { ExitThread(); };
             menu.Items.Add(_showMenuItem);
             menu.Items.Add(_refreshMenuItem);
+            menu.Items.Add(_aihotMenuItem);
+            menu.Items.Add(_aihotBlinkMenuItem);
+            menu.Items.Add(_resetWidgetPositionMenuItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(_exitMenuItem);
             _widget.ContextMenuStrip = menu;
@@ -93,10 +131,39 @@ namespace CodexQuotaTray
                 ApplyVisualResult(_lastResult);
             };
 
+            _aihotBlinkTimer = new Timer { Interval = AihotBlinkController.TickIntervalMilliseconds };
+            _aihotBlinkTimer.Tick += delegate { _aihotBlink.Tick(); };
+            _aihotBlinkTimer.Start();
+
+            _anchorRefreshTimer = new Timer { Interval = 400 };
+            _anchorRefreshTimer.Tick += delegate
+            {
+                _anchorRefreshTimer.Stop();
+                _lastAnchorRefreshUtc = DateTime.UtcNow;
+                _widget.RefreshDynamicAnchor();
+            };
+            _desktopWatcher = new DesktopWindowWatcher();
+            _desktopWatcher.Changed += delegate(bool anchorChanged)
+            {
+                if (_widget.IsDisposed) return;
+                RefreshOverlayFullscreenState();
+                if (anchorChanged && !_settings.WidgetManualPosition && !_overlaySuppressedByFullscreen)
+                {
+                    _anchorRefreshTimer.Stop();
+                    _anchorRefreshTimer.Start();
+                }
+            };
+
             _widgetGuardTimer = new Timer { Interval = 1000 };
             _widgetGuardTimer.Tick += delegate
             {
-                if (_settings.WidgetVisible) _widget.EnsureOnTop();
+                RefreshOverlayFullscreenState();
+                if (!_overlaySuppressedByFullscreen && _settings.WidgetVisible) _widget.EnsureOnTop();
+                if (!_overlaySuppressedByFullscreen && !_settings.WidgetManualPosition && DateTime.UtcNow - _lastAnchorRefreshUtc >= TimeSpan.FromSeconds(20))
+                {
+                    _lastAnchorRefreshUtc = DateTime.UtcNow;
+                    _widget.RefreshDynamicAnchor();
+                }
                 var systemLight = ThemePalette.SystemUsesLightAppearance();
                 if (string.Equals(_settings.AppearanceMode, "system", StringComparison.OrdinalIgnoreCase) &&
                     systemLight != _lastSystemLightAppearance)
@@ -117,7 +184,43 @@ namespace CodexQuotaTray
             UpdateLanguage();
             ApplyCompletionReminderSetting();
             RefreshNow();
+            RefreshOverlayFullscreenState();
             _widget.SetVisible(_settings.WidgetVisible);
+        }
+
+        /// <summary>
+        /// 每秒(随守护定时器)评估前台是否全屏覆盖悬浮窗所在显示器:
+        /// 全屏 → 抑制显示;退出全屏 → 由守护定时器同一 tick 内 EnsureOnTop 恢复。
+        /// </summary>
+        private void RefreshOverlayFullscreenState()
+        {
+            var wasSuppressed = _overlaySuppressedByFullscreen;
+            var suppressed = false;
+            try { suppressed = FullscreenDetector.IsFullscreenOnWidgetMonitor(GetWidgetHandle()); }
+            catch { suppressed = false; }
+            _overlaySuppressedByFullscreen = suppressed;
+            _widget.SetOverlaySuppressed(suppressed);
+            _aihotBlink.SetSuppressed(suppressed);
+            if (wasSuppressed && !suppressed && _settings.WidgetVisible) _widget.EnsureOnTop();
+        }
+
+        private IntPtr GetWidgetHandle()
+        {
+            try { return _widget.IsHandleCreated ? _widget.Handle : IntPtr.Zero; }
+            catch { return IntPtr.Zero; }
+        }
+
+        /// <summary>AIHOT 服务在后台线程发现「本地从未见过」的新事件时回调。</summary>
+        private void OnAihotNewResetsDetected(int count)
+        {
+            try
+            {
+                if (_widget.IsDisposed || !_widget.IsHandleCreated) return;
+                _widget.BeginInvoke(new Action(delegate { _aihotBlink.NotifyNewEvents(); }));
+            }
+            catch
+            {
+            }
         }
 
         private void ApplySettingsChange()
@@ -127,6 +230,7 @@ namespace CodexQuotaTray
 
             _lastSystemLightAppearance = ThemePalette.SystemUsesLightAppearance();
             _lastSystemLanguage = AppSettings.SystemLanguageName();
+            _aihotBlink.SetEnabled(_settings.AihotBlinkEnabled);
             ApplySettingsVisuals();
             ApplyCompletionReminderSetting();
         }
@@ -136,6 +240,7 @@ namespace CodexQuotaTray
             _popup.ApplySettings(_settings);
             _widget.ApplySettings(_settings);
             _widget.SetVisible(_settings.WidgetVisible);
+            if (_aihotForm != null && !_aihotForm.IsDisposed) _aihotForm.ApplySettings(_settings);
             UpdateLanguage();
             ApplyVisualResult(_lastResult);
         }
@@ -144,6 +249,10 @@ namespace CodexQuotaTray
         {
             _showMenuItem.Text = T("显示详情", "Show details");
             _refreshMenuItem.Text = T("立即刷新", "Refresh now");
+            _aihotMenuItem.Text = T("AIHOT · Codex 重置", "AIHOT · Codex resets");
+            _aihotBlinkMenuItem.Text = T("AIHOT 新通知闪烁提醒", "Blink on new AIHOT resets");
+            _aihotBlinkMenuItem.Checked = _settings.AihotBlinkEnabled;
+            _resetWidgetPositionMenuItem.Text = T("重置悬浮窗位置", "Reset widget position");
             _exitMenuItem.Text = T("退出", "Quit");
         }
 
@@ -164,6 +273,25 @@ namespace CodexQuotaTray
             {
                 _popup.ShowCenteredAbove(anchorBounds);
                 RefreshInBackground();
+            }
+        }
+
+        private void ShowAihotWindow()
+        {
+            try
+            {
+                if (_aihotForm == null || _aihotForm.IsDisposed)
+                {
+                    _aihotForm = new AihotResetsForm(_aihotService, _settings);
+                }
+                _aihotForm.ApplySettings(_settings);
+                _aihotForm.Show();
+                if (_aihotForm.WindowState == FormWindowState.Minimized) _aihotForm.WindowState = FormWindowState.Normal;
+                _aihotForm.BringToFront();
+                _aihotForm.Activate();
+            }
+            catch
+            {
             }
         }
 
@@ -418,6 +546,9 @@ namespace CodexQuotaTray
 
         protected override void ExitThreadCore()
         {
+            _desktopWatcher.Dispose();
+            _anchorRefreshTimer.Stop();
+            _anchorRefreshTimer.Dispose();
             _refreshTimer.Stop();
             _refreshTimer.Dispose();
             _widgetGuardTimer.Stop();
@@ -426,6 +557,11 @@ namespace CodexQuotaTray
             _notificationTimer.Dispose();
             _completionFlashTimer.Stop();
             _completionFlashTimer.Dispose();
+            _aihotBlinkTimer.Stop();
+            _aihotBlinkTimer.Dispose();
+            try { _aihotService.NewResetsDetected -= OnAihotNewResetsDetected; } catch { }
+            try { if (_aihotForm != null) _aihotForm.Dispose(); } catch { }
+            try { _aihotService.Dispose(); } catch { }
             _notifyIcon.Visible = false;
             _notifyIcon.Dispose();
             _popup.Dispose();

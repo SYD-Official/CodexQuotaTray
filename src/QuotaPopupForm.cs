@@ -21,7 +21,7 @@ namespace CodexQuotaTray
         }
 
         private const int BaseWidth = 420;
-        private const int BaseHeight = 590;
+        private const int BaseHeight = 654;
 
         [DllImport("gdi32.dll", EntryPoint = "CreateRoundRectRgn")]
         private static extern IntPtr CreateRoundRectRgn(int left, int top, int right, int bottom, int width, int height);
@@ -57,8 +57,9 @@ namespace CodexQuotaTray
         private static extern bool SetWindowPos(IntPtr window, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
 
         private readonly Rectangle _refreshBounds = new Rectangle(366, 20, 34, 34);
-        private readonly Rectangle _settingsBounds = new Rectangle(20, 468, 380, 60);
-        private readonly Rectangle _exitBounds = new Rectangle(350, 548, 50, 34);
+        private readonly Rectangle _aihotBounds = new Rectangle(20, 468, 380, 60);
+        private readonly Rectangle _settingsBounds = new Rectangle(20, 534, 380, 60);
+        private readonly Rectangle _exitBounds = new Rectangle(350, 612, 50, 34);
         private readonly Rectangle _backBounds = new Rectangle(18, 18, 38, 38);
         private readonly Rectangle _widgetToggleBounds = new Rectangle(350, 101, 46, 24);
         private readonly Rectangle _appearanceSystemBounds = new Rectangle(222, 214, 56, 25);
@@ -67,10 +68,10 @@ namespace CodexQuotaTray
         private readonly Rectangle _languageSystemBounds = new Rectangle(222, 418, 56, 34);
         private readonly Rectangle _languageZhBounds = new Rectangle(282, 418, 54, 34);
         private readonly Rectangle _languageEnBounds = new Rectangle(340, 418, 56, 34);
-        private readonly Rectangle _displaySettingsBounds = new Rectangle(16, 466, 388, 60);
+        private readonly Rectangle _displaySettingsBounds = new Rectangle(16, 530, 388, 60);
         private readonly Rectangle _resetBounds = new Rectangle(326, 18, 70, 38);
-        private readonly Rectangle _homeBounds = new Rectangle(18, 536, 96, 54);
-        private readonly Rectangle _returnSettingsBounds = new Rectangle(18, 536, 120, 54);
+        private readonly Rectangle _homeBounds = new Rectangle(18, 600, 96, 54);
+        private readonly Rectangle _returnSettingsBounds = new Rectangle(18, 600, 120, 54);
         private readonly Rectangle _customPrimaryBounds = new Rectangle(314, 366, 28, 28);
         private readonly Rectangle _customSecondaryBounds = new Rectangle(354, 366, 28, 28);
         private readonly Rectangle _range5Bounds = new Rectangle(24, 320, 48, 27);
@@ -130,15 +131,19 @@ namespace CodexQuotaTray
         private const int HoverHome = 47;
         private const int HoverQuotaLayoutToggle = 48;
         private const int HoverCompletionReminderToggle = 49;
+        private const int HoverAihotEntry = 51;
+        private const int HoverAihotRowFirst = 60;
 
         private readonly Timer _hoverTimer;
         private readonly Timer _sliderSnapTimer;
 
         private QuotaReadResult _result;
+        private AihotService _aihotService;
         private AppSettings _settings = new AppSettings();
         private ThemePalette _palette;
         private bool _showSettings;
         private bool _showDisplaySettings;
+        private bool _showAihotPage;
         private float _dpiScale = 1f;
         private Rectangle _lastAnchorBounds;
         private List<ActivityBucket> _currentBuckets = new List<ActivityBucket>();
@@ -208,10 +213,17 @@ namespace CodexQuotaTray
             Invalidate();
         }
 
+        public void AttachAihotService(AihotService service)
+        {
+            _aihotService = service;
+            Invalidate();
+        }
+
         internal void ShowPreviewPage(int page)
         {
             _showSettings = page == 1;
             _showDisplaySettings = page == 2;
+            _showAihotPage = page == 3;
             Invalidate();
         }
 
@@ -291,6 +303,7 @@ namespace CodexQuotaTray
             SetHoverIndex(-1);
             _showSettings = false;
             _showDisplaySettings = false;
+            _showAihotPage = false;
             Hide();
         }
 
@@ -368,7 +381,14 @@ namespace CodexQuotaTray
                 return;
             }
 
+            if (_showAihotPage)
+            {
+                HandleAihotPageClick(point);
+                return;
+            }
+
             if (_refreshBounds.Contains(point)) Raise(RefreshRequested);
+            else if (_aihotBounds.Contains(point)) { SetHoverIndex(-1); _showAihotPage = true; if (_aihotService != null) _aihotService.RequestManualRefresh(); Invalidate(); }
             else if (_settingsBounds.Contains(point)) { SetHoverIndex(-1); _showSettings = true; Invalidate(); }
             else if (_range5Bounds.Contains(point)) SetActivityRange(ActivityRange.Hours5);
             else if (_range24Bounds.Contains(point)) SetActivityRange(ActivityRange.Hours24);
@@ -413,6 +433,13 @@ namespace CodexQuotaTray
                 return;
             }
 
+            if (_showAihotPage)
+            {
+                SetHoverIndex(-1);
+                SetHoverHint(HitTestAihotPage(logicalPoint));
+                return;
+            }
+
             var mainTarget = HitTestMain(logicalPoint);
             if (mainTarget != 0)
             {
@@ -439,6 +466,7 @@ namespace CodexQuotaTray
         private int HitTestMain(Point point)
         {
             if (_refreshBounds.Contains(point)) return HoverRefresh;
+            if (_aihotBounds.Contains(point)) return HoverAihotEntry;
             if (_settingsBounds.Contains(point)) return HoverSettingsEntry;
             if (_range5Bounds.Contains(point)) return HoverRange5;
             if (_range24Bounds.Contains(point)) return HoverRange24;
@@ -500,6 +528,7 @@ namespace CodexQuotaTray
             if (Visible) return;
             _showSettings = false;
             _showDisplaySettings = false;
+            _showAihotPage = false;
             _activeSlider = -1;
         }
 
@@ -544,6 +573,7 @@ namespace CodexQuotaTray
 
             if (_showDisplaySettings) DrawDisplaySettingsPage(graphics);
             else if (_showSettings) DrawSettingsPage(graphics);
+            else if (_showAihotPage) DrawAihotPage(graphics);
             else DrawMainPage(graphics);
 
             if (_glassActive)
@@ -559,6 +589,7 @@ namespace CodexQuotaTray
             DrawHeader(graphics);
             DrawQuota(graphics);
             DrawActivity(graphics);
+            DrawAihotEntry(graphics);
             DrawSettingsEntry(graphics);
             DrawFooter(graphics);
             DrawHoverHint(graphics);
@@ -818,12 +849,174 @@ namespace CodexQuotaTray
                 using (var background = new SolidBrush(Color.FromArgb(_palette.IsLight ? 18 : 28, _palette.Primary)))
                     graphics.FillRoundedRectangle(background, _settingsBounds, 9);
             }
-            DrawGearIcon(graphics, new Point(38, 498));
-            DrawText(graphics, T("设置", "Settings"), 10.5f, new RectangleF(61, 477, 210, 28), _palette.Text, FontStyle.Regular);
+            DrawGearIcon(graphics, new Point(38, 564));
+            DrawText(graphics, T("设置", "Settings"), 10.5f, new RectangleF(61, 543, 210, 28), _palette.Text, FontStyle.Regular);
             DrawText(graphics, T("配色、语言、数字条与更多设置", "Color, language, meter and more"), 8.5f,
-                new RectangleF(61, 501, 290, 22), _palette.Muted, FontStyle.Regular);
+                new RectangleF(61, 567, 290, 22), _palette.Muted, FontStyle.Regular);
+            DrawText(graphics, "›", 17, new RectangleF(374, 548, 20, 30), _palette.Muted, FontStyle.Regular, StringAlignment.Far);
+            DrawDivider(graphics, 600);
+        }
+
+        private void DrawAihotEntry(Graphics graphics)
+        {
+            if (_hoverHint == HoverAihotEntry)
+            {
+                using (var background = new SolidBrush(Color.FromArgb(_palette.IsLight ? 18 : 28, _palette.Primary)))
+                    graphics.FillRoundedRectangle(background, _aihotBounds, 9);
+            }
+            DrawResetIcon(graphics, new Point(38, 498));
+            DrawText(graphics, T("AIHOT · Codex 重置", "AIHOT · Codex resets"), 10.5f, new RectangleF(61, 477, 270, 28), _palette.Text, FontStyle.Regular);
+            DrawText(graphics, BuildAihotSummaryLine(), 8.5f, new RectangleF(61, 501, 306, 22), _palette.Muted, FontStyle.Regular);
             DrawText(graphics, "›", 17, new RectangleF(374, 482, 20, 30), _palette.Muted, FontStyle.Regular, StringAlignment.Far);
-            DrawDivider(graphics, 536);
+        }
+
+        private void DrawResetIcon(Graphics graphics, Point center)
+        {
+            using (var pen = new Pen(_palette.Muted, 1.6f))
+            {
+                pen.StartCap = pen.EndCap = LineCap.Round;
+                graphics.DrawArc(pen, center.X - 8, center.Y - 8, 16, 16, 40, 280);
+                var tipX = center.X + 6.1f;
+                var tipY = center.Y - 5.1f;
+                graphics.DrawLine(pen, tipX, tipY, tipX - 1.2f, tipY - 6.4f);
+                graphics.DrawLine(pen, tipX, tipY, tipX + 6.4f, tipY - 1.2f);
+            }
+        }
+
+        private AihotResetsSnapshot GetAihotSnapshot()
+        {
+            return _aihotService == null ? null : _aihotService.GetSnapshot();
+        }
+
+        private string BuildAihotSummaryLine()
+        {
+            var snapshot = GetAihotSnapshot();
+            if (snapshot == null) return T("正在获取重置信息…", "Fetching reset info…");
+            var failed = snapshot.StatusKey == "network" || snapshot.StatusKey == "http" || snapshot.StatusKey == "parse";
+            if (snapshot.Events.Count == 0)
+            {
+                if (snapshot.StatusKey == "ratelimited") return T("接口限流,稍后自动重试", "Rate limited, retrying later");
+                if (failed) return T("暂时无法获取,稍后自动重试", "Temporarily unavailable, retrying later");
+                return T("正在获取重置信息…", "Fetching reset info…");
+            }
+            var latest = snapshot.Events[0];
+            var text = T("最近重置 ", "Latest reset ") + (latest.TimeText ?? "--");
+            var label = latest.DisplayLabel;
+            if (string.IsNullOrWhiteSpace(label)) label = latest.Title;
+            if (!string.IsNullOrWhiteSpace(label)) text += " · " + label;
+            if (snapshot.PendingCount > 0) text += T(" · 预告 " + snapshot.PendingCount + " 条", " · " + snapshot.PendingCount + " upcoming");
+            if (failed) text += T("(离线)", " (offline)");
+            return text;
+        }
+
+        private string BuildAihotStatusText(AihotResetsSnapshot snapshot)
+        {
+            if (snapshot == null) return null;
+            var fetched = snapshot.FetchedAtLocal.HasValue ? snapshot.FetchedAtLocal.Value.ToString("HH:mm") : "--";
+            switch (snapshot.StatusKey)
+            {
+                case "ok": return T("已更新 " + fetched, "Updated " + fetched);
+                case "not-modified": return T("已检查 · 暂无变化", "Checked · no changes");
+                case "cache": return T("显示缓存(" + fetched + "),正在等待更新…", "Showing cache (" + fetched + "), waiting for update…");
+                case "network": return T("网络异常,显示 " + fetched + " 的数据", "Network error, showing data from " + fetched);
+                case "http": return T("接口异常(" + (snapshot.StatusDetail ?? "HTTP") + "),稍后自动重试", "Service error (" + (snapshot.StatusDetail ?? "HTTP") + "), will retry later");
+                case "parse": return T("数据解析失败,保留上次数据", "Parse failed, keeping last data");
+                case "ratelimited": return T("接口限流,稍后自动重试", "Rate limited, retrying later");
+                default: return null;
+            }
+        }
+
+        private Rectangle GetAihotRowBounds(int index)
+        {
+            return new Rectangle(24, 96 + index * 54, 372, 50);
+        }
+
+        private int HitTestAihotPage(Point point)
+        {
+            if (_backBounds.Contains(point)) return HoverBack;
+            if (_homeBounds.Contains(point)) return HoverHome;
+            if (_exitBounds.Contains(point)) return HoverExit;
+            var snapshot = GetAihotSnapshot();
+            if (snapshot != null)
+            {
+                var count = Math.Min(6, snapshot.Events.Count);
+                for (var index = 0; index < count; index++)
+                {
+                    if (GetAihotRowBounds(index).Contains(point)) return HoverAihotRowFirst + index;
+                }
+            }
+            return 0;
+        }
+
+        private void HandleAihotPageClick(Point point)
+        {
+            if (_backBounds.Contains(point) || _homeBounds.Contains(point)) { _showAihotPage = false; Invalidate(); return; }
+            var snapshot = GetAihotSnapshot();
+            if (snapshot == null) return;
+            var count = Math.Min(6, snapshot.Events.Count);
+            for (var index = 0; index < count; index++)
+            {
+                if (!GetAihotRowBounds(index).Contains(point)) continue;
+                var url = snapshot.Events[index].PrimaryUrl;
+                if (!string.IsNullOrWhiteSpace(url)) OpenUrl(url);
+                return;
+            }
+        }
+
+        private void DrawAihotPage(Graphics graphics)
+        {
+            DrawBackIcon(graphics);
+            DrawText(graphics, T("AIHOT · Codex 重置", "AIHOT · Codex resets"), 14, new RectangleF(60, 18, 280, 28), _palette.Text, FontStyle.Bold);
+            DrawText(graphics, T("数据来自 aihot.news(只读)· 每 10 分钟自动更新", "Data from aihot.news (read-only) · auto refresh every 10 min"),
+                8.5f, new RectangleF(60, 47, 330, 22), _palette.Muted, FontStyle.Regular);
+            DrawDivider(graphics, 82);
+
+            var snapshot = GetAihotSnapshot();
+            var events = snapshot == null ? new List<AihotResetEventItem>() : snapshot.Events;
+            if (events.Count == 0)
+            {
+                var emptyText = T("正在获取重置信息…", "Fetching reset info…");
+                if (snapshot != null && (snapshot.StatusKey == "network" || snapshot.StatusKey == "http" || snapshot.StatusKey == "parse"))
+                    emptyText = T("暂时无法获取,稍后自动重试(不影响其它功能)", "Temporarily unavailable; retrying later (other features unaffected)");
+                else if (snapshot != null && snapshot.StatusKey == "ratelimited")
+                    emptyText = T("接口限流,稍后自动重试", "Rate limited, retrying later");
+                DrawText(graphics, emptyText, 9.5f, new RectangleF(24, 130, 372, 80), _palette.Faint, FontStyle.Regular, StringAlignment.Center);
+            }
+            else
+            {
+                var maxRows = Math.Min(6, events.Count);
+                for (var index = 0; index < maxRows; index++)
+                {
+                    var item = events[index];
+                    var top = 96 + index * 54;
+                    if (_hoverHint == HoverAihotRowFirst + index)
+                    {
+                        using (var background = new SolidBrush(Color.FromArgb(_palette.IsLight ? 16 : 26, _palette.Primary)))
+                            graphics.FillRoundedRectangle(background, new Rectangle(20, top - 2, 380, 50), 8);
+                    }
+                    var label = item.DisplayLabel;
+                    if (string.IsNullOrWhiteSpace(label)) label = item.Title;
+                    if (string.IsNullOrWhiteSpace(label)) label = T("重置事件", "Reset event");
+                    if (item.IsPending) label = T("预告 · ", "Upcoming · ") + label;
+                    DrawText(graphics, label, 9.8f, new RectangleF(28, top, 240, 24), item.IsPending ? _palette.Warning : _palette.Text, FontStyle.Bold);
+                    DrawText(graphics, item.TimeText ?? "", 8.5f, new RectangleF(300, top, 96, 24), _palette.Muted, FontStyle.Regular, StringAlignment.Far);
+                    var detail = "";
+                    if (!string.IsNullOrWhiteSpace(item.ScheduleText))
+                        detail += (item.IsPending ? "【" + T("预告", "Upcoming") + "】" : "") + item.ScheduleText + "  ";
+                    if (!string.IsNullOrWhiteSpace(item.SummaryText)) detail += item.SummaryText;
+                    DrawText(graphics, detail, 8.2f, new RectangleF(28, top + 22, 368, 22), _palette.Muted, FontStyle.Regular);
+                }
+                var afterRows = 96 + maxRows * 54;
+                var status = BuildAihotStatusText(snapshot);
+                if (!string.IsNullOrWhiteSpace(status))
+                    DrawText(graphics, status, 8, new RectangleF(24, afterRows + 4, 372, 22), _palette.Faint, FontStyle.Regular);
+            }
+
+            DrawText(graphics, T("点击条目打开原帖 · 来源:AIHOT", "Click an item to open its source post · Source: AIHOT"), 7.8f,
+                new RectangleF(24, 560, 372, 22), _palette.Faint, FontStyle.Regular);
+            DrawDivider(graphics, 600);
+            DrawText(graphics, T("返回首页", "Back to home"), 8.8f, _homeBounds, InteractiveTextColor(HoverHome, _palette.Muted), FontStyle.Regular);
+            DrawText(graphics, T("退出", "Quit"), 10, _exitBounds, InteractiveTextColor(HoverExit, _palette.Text), FontStyle.Regular, StringAlignment.Far);
         }
 
         private void DrawHoverHint(Graphics graphics)
@@ -886,10 +1079,10 @@ namespace CodexQuotaTray
                 using (var background = new SolidBrush(Color.FromArgb(_palette.IsLight ? 18 : 28, _palette.Primary)))
                     graphics.FillRoundedRectangle(background, _displaySettingsBounds, 6);
             }
-            DrawText(graphics, T("更多设置", "More settings"), 10.5f, new RectangleF(24, 467, 180, 29), _palette.Text, FontStyle.Regular);
-            DrawText(graphics, T("尺寸、玻璃、提醒与版本", "Size, glass, alerts and version"), 7.6f, new RectangleF(24, 496, 300, 20), _palette.Muted, FontStyle.Regular);
-            DrawText(graphics, "›", 15, new RectangleF(372, 480, 20, 28), _palette.Muted, FontStyle.Regular, StringAlignment.Far);
-            DrawDivider(graphics, 536);
+            DrawText(graphics, T("更多设置", "More settings"), 10.5f, new RectangleF(24, 531, 180, 29), _palette.Text, FontStyle.Regular);
+            DrawText(graphics, T("尺寸、玻璃、提醒与版本", "Size, glass, alerts and version"), 7.6f, new RectangleF(24, 560, 300, 20), _palette.Muted, FontStyle.Regular);
+            DrawText(graphics, "›", 15, new RectangleF(372, 544, 20, 28), _palette.Muted, FontStyle.Regular, StringAlignment.Far);
+            DrawDivider(graphics, 600);
             DrawText(graphics, T("返回首页", "Back to home"), 8.8f, _homeBounds,
                 InteractiveTextColor(HoverHome, _palette.Muted), FontStyle.Regular);
             DrawText(graphics, T("退出", "Quit"), 10, _exitBounds, InteractiveTextColor(HoverExit, _palette.Text), FontStyle.Regular, StringAlignment.Far);
@@ -955,7 +1148,7 @@ namespace CodexQuotaTray
             DrawSegment(graphics, _bilibiliBounds, false, T("B站主页", "Bilibili"), HoverBilibili);
             DrawSegment(graphics, _githubBounds, false, "GitHub", HoverGitHub);
 
-            DrawDivider(graphics, 536);
+            DrawDivider(graphics, 600);
             DrawText(graphics, T("返回设置", "Back to settings"), 8.8f, _returnSettingsBounds, InteractiveTextColor(HoverReturnSettings, _palette.Muted), FontStyle.Regular);
             DrawText(graphics, T("退出", "Quit"), 10, _exitBounds, InteractiveTextColor(HoverExit, _palette.Text), FontStyle.Regular, StringAlignment.Far);
         }
@@ -1561,7 +1754,7 @@ namespace CodexQuotaTray
             var updated = _result != null && _result.Snapshot != null
                 ? T("更新 ", "Updated ") + _result.Snapshot.CapturedAt.ToLocalTime().ToString("HH:mm")
                 : T("等待更新", "Waiting");
-            DrawText(graphics, updated, 8.5f, new RectangleF(24, 549, 180, 30), _palette.Faint, FontStyle.Regular);
+            DrawText(graphics, updated, 8.5f, new RectangleF(24, 613, 180, 30), _palette.Faint, FontStyle.Regular);
             DrawText(graphics, T("退出", "Quit"), 10, _exitBounds, InteractiveTextColor(HoverExit, _palette.Text), FontStyle.Regular, StringAlignment.Far);
         }
 

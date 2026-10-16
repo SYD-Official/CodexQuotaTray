@@ -2,10 +2,17 @@
 
 一个只读的 Windows 额度小工具，用来显示 Codex 当前账户额度和本地 token 活动。
 
+## v2.6.3 更新
+
+- 修复 Chrome 网页视频全屏仍显示任务栏数字条的问题：兼容全屏后仍保留最大化标志的窗口，并通过窗口事件及时隐藏和恢复。
+- 任务栏图标增减后自动重新读取位置；坐标探针使用同一个 EXE 的短时后台进程，无需额外文件，并保留独立的 20 秒兜底刷新。
+- 支持在任务栏内拖动数字条。拖动后自动保存相对位置，图标增减时保持手动位置；普通单击仍打开详情，拖动松开不会误触单击。
+- 托盘右键菜单新增“重置悬浮窗位置”，可恢复自动定位。分辨率或 DPI 变化后按比例恢复位置，进入全屏时仍会隐藏。
+
 ## 使用方法
 
 1. 先启动 Codex 桌面应用。
-2. 双击最新的版本化 EXE，例如 `CodexQuotaTray-v2.6.0.exe`。
+2. 双击最新的版本化 EXE，例如 `CodexQuotaTray-v2.6.3.exe`。
 3. 点击任务栏数字条或右下角托盘图标查看详情；右键可以刷新或退出。
 
 本工具不会替你启动、登录或控制 Codex。Codex 运行时，程序通过已安装的 Codex 只读接口获取当前额度；Codex 没有运行时，数字条显示离线。
@@ -71,7 +78,7 @@ Windows 没有向普通应用开放常驻任务栏文字槽，因此数字条仍
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-生成文件使用版本化名称，例如 `dist\CodexQuotaTray-v2.6.0.exe`，并同时生成配套的完整 TXT 使用说明；构建新版不会覆盖旧版文件。项目使用 Windows 自带的 .NET Framework 4.8 编译器，不需要安装 Visual Studio 或 .NET SDK。
+生成文件使用版本化名称，例如 `dist\CodexQuotaTray-v2.6.3.exe`，并同时生成配套的完整 TXT 使用说明；构建新版不会覆盖旧版文件。项目使用 Windows 自带的 .NET Framework 4.8 编译器，不需要安装 Visual Studio 或 .NET SDK。
 
 作者：渡缘笙SYD · [Bilibili](https://space.bilibili.com/1266346466) · [GitHub](https://github.com/SYD-Official/CodexQuotaTray)
 

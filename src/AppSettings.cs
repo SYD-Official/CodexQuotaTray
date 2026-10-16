@@ -23,8 +23,11 @@ namespace CodexQuotaTray
         }
 
         public bool WidgetVisible { get; set; }
+        public bool WidgetManualPosition { get; set; }
+        public double WidgetPositionRatio { get; set; }
         public bool QuotaPrimaryEmphasis { get; set; }
         public bool CompletionReminderEnabled { get; set; }
+        public bool AihotBlinkEnabled { get; set; }
         public bool GlassEnabled { get; set; }
         public int GlassOpacityPercent { get; set; }
         public string ThemeId { get; set; }
@@ -50,8 +53,11 @@ namespace CodexQuotaTray
         public void Reset()
         {
             WidgetVisible = true;
+            WidgetManualPosition = false;
+            WidgetPositionRatio = 0.5;
             QuotaPrimaryEmphasis = true;
             CompletionReminderEnabled = false;
+            AihotBlinkEnabled = false;
             GlassEnabled = true;
             GlassOpacityPercent = 40;
             ThemeId = "cyan";
@@ -67,8 +73,12 @@ namespace CodexQuotaTray
 
         public static AppSettings Load()
         {
+            return LoadFrom(GetPath());
+        }
+
+        internal static AppSettings LoadFrom(string path)
+        {
             var settings = new AppSettings();
-            var path = GetPath();
             if (!File.Exists(path))
             {
                 return settings;
@@ -86,11 +96,17 @@ namespace CodexQuotaTray
 
                 bool widgetVisible;
                 if (TryGet(values, "WidgetVisible", out widgetVisible)) settings.WidgetVisible = widgetVisible;
+                if (TryGet(values, "WidgetManualPosition", out widgetVisible)) settings.WidgetManualPosition = widgetVisible;
                 if (TryGet(values, "QuotaPrimaryEmphasis", out widgetVisible)) settings.QuotaPrimaryEmphasis = widgetVisible;
                 if (TryGet(values, "CompletionReminderEnabled", out widgetVisible)) settings.CompletionReminderEnabled = widgetVisible;
+                if (TryGet(values, "AihotBlinkEnabled", out widgetVisible)) settings.AihotBlinkEnabled = widgetVisible;
                 if (TryGet(values, "GlassEnabled", out widgetVisible)) settings.GlassEnabled = widgetVisible;
 
                 string text;
+                double ratio;
+                if (values.TryGetValue("WidgetPositionRatio", out text) &&
+                    double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out ratio))
+                    settings.WidgetPositionRatio = WidgetPlacement.ClampRatio(ratio);
                 if (values.TryGetValue("Theme", out text) && ThemePalette.IsKnownTheme(text)) settings.ThemeId = text;
                 if (values.TryGetValue("Appearance", out text) && (text == "system" || text == "dark" || text == "light"))
                     settings.AppearanceMode = text;
@@ -121,13 +137,20 @@ namespace CodexQuotaTray
 
         public void Save()
         {
-            var path = GetPath();
+            SaveTo(GetPath());
+        }
+
+        internal void SaveTo(string path)
+        {
             Directory.CreateDirectory(Path.GetDirectoryName(path));
             File.WriteAllLines(path, new[]
             {
                 "WidgetVisible=" + WidgetVisible,
+                "WidgetManualPosition=" + WidgetManualPosition,
+                "WidgetPositionRatio=" + WidgetPlacement.ClampRatio(WidgetPositionRatio).ToString("0.0000", CultureInfo.InvariantCulture),
                 "QuotaPrimaryEmphasis=" + QuotaPrimaryEmphasis,
                 "CompletionReminderEnabled=" + CompletionReminderEnabled,
+                "AihotBlinkEnabled=" + AihotBlinkEnabled,
                 "GlassEnabled=" + GlassEnabled,
                 "GlassOpacityPercent=" + GlassOpacityPercent,
                 "Theme=" + ThemeId,
