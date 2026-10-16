@@ -42,6 +42,51 @@ internal static class ParserTests
         Assert(!FullscreenDetector.ShouldHideOverlay(monitorBounds, Rectangle.Empty, false, 0),
             "无效显示器边界不应识别为全屏");
         var defaults = new AppSettings();
+        Assert(!defaults.WidgetManualPosition && defaults.WidgetPositionRatio == 0.5,
+            "默认应自动定位，手动位置比例为中间值");
+        Assert(WidgetPlacement.Coordinate(0, 1920, 122, 0) == 4 && WidgetPlacement.Coordinate(0, 1920, 122, 1) == 1794,
+            "手动位置应限制在任务栏两端四像素内边距之间");
+        Assert(WidgetPlacement.Coordinate(0, 1920, 122, -10) == 4 && WidgetPlacement.Coordinate(0, 1920, 122, 10) == 1794,
+            "越界比例应限制到任务栏范围");
+        Assert(WidgetPlacement.ClampRatio(double.NaN) == 0.5 && WidgetPlacement.ClampRatio(double.PositiveInfinity) == 0.5,
+            "无效比例应回退到中间值");
+        Assert(WidgetPlacement.Coordinate(-1920, 0, 122, 0) == -1916 && WidgetPlacement.Coordinate(-1920, 0, 122, 1) == -126,
+            "手动位置应支持负坐标显示器");
+        Assert(WidgetPlacement.Coordinate(0, 1080, 38, 1) == 1038,
+            "竖向任务栏应复用相同的比例模型");
+        Assert(WidgetPlacement.Coordinate(0, 100, 122, 0.7) == 4 && WidgetPlacement.Ratio(20, 0, 100, 122) == 0,
+            "可用区间过小时不应除零或产生倒置范围");
+        var savedRatio = WidgetPlacement.Ratio(564, 0, 1920, 122);
+        Assert(WidgetPlacement.Coordinate(0, 1920, 122, savedRatio) == 564,
+            "位置转比例后应能精确恢复原始坐标");
+        Assert(WidgetPlacement.Ratio(-100, 0, 1920, 122) == 0 && WidgetPlacement.Ratio(3000, 0, 1920, 122) == 1,
+            "拖动超出任务栏时应夹到两端");
+        Assert(WidgetPlacement.Coordinate(0, 2560, 159, savedRatio) > 564,
+            "分辨率和窗口尺寸变化后应按比例恢复位置");
+        Assert(!WidgetPlacement.StartsDrag(new Point(10, 10), new Point(13, 13), new Size(4, 4)),
+            "未超过拖动阈值的移动应保留单击");
+        Assert(WidgetPlacement.StartsDrag(new Point(10, 10), new Point(14, 10), new Size(4, 4)) &&
+            WidgetPlacement.StartsDrag(new Point(10, 10), new Point(10, 6), new Size(4, 4)),
+            "两个方向的阈值都应触发拖动");
+        var settingsFixture = Path.Combine(Path.GetTempPath(), "cqt-placement-" + Guid.NewGuid().ToString("N"), "settings.ini");
+        try
+        {
+            var placementSettings = new AppSettings { WidgetManualPosition = true, WidgetPositionRatio = 0.2735 };
+            placementSettings.SaveTo(settingsFixture);
+            var roundtrip = AppSettings.LoadFrom(settingsFixture);
+            Assert(roundtrip.WidgetManualPosition && Math.Abs(roundtrip.WidgetPositionRatio - 0.2735) < 0.00001,
+                "手动位置应通过设置文件保存并恢复");
+            File.WriteAllText(settingsFixture, "WidgetManualPosition=True\nWidgetPositionRatio=NaN\n");
+            Assert(AppSettings.LoadFrom(settingsFixture).WidgetPositionRatio == 0.5,
+                "损坏的设置比例应回退到安全位置");
+            File.WriteAllText(settingsFixture, "WidgetManualPosition=True\nWidgetPositionRatio=2.5\n");
+            Assert(AppSettings.LoadFrom(settingsFixture).WidgetPositionRatio == 1,
+                "超出范围的设置比例应被限制");
+            placementSettings.Reset();
+            Assert(!placementSettings.WidgetManualPosition && placementSettings.WidgetPositionRatio == 0.5,
+                "恢复默认设置应清除手动位置");
+        }
+        finally { if (File.Exists(settingsFixture)) File.Delete(settingsFixture); Directory.Delete(Path.GetDirectoryName(settingsFixture)); }
         Assert(defaults.GlassEnabled && defaults.GlassOpacityPercent == 40,
             "柔光玻璃应默认开启且不透明度为 40%");
         Assert(defaults.QuotaPrimaryEmphasis, "额度详情应默认使用主次布局");

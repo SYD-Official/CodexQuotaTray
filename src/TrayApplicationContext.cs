@@ -20,6 +20,9 @@ namespace CodexQuotaTray
         private readonly TaskbarWidgetForm _widget;
         private readonly Timer _refreshTimer;
         private readonly Timer _widgetGuardTimer;
+        private readonly Timer _anchorRefreshTimer;
+        private readonly DesktopWindowWatcher _desktopWatcher;
+        private DateTime _lastAnchorRefreshUtc;
         private readonly Timer _notificationTimer;
         private readonly Timer _completionFlashTimer;
         private readonly Timer _aihotBlinkTimer;
@@ -29,6 +32,7 @@ namespace CodexQuotaTray
         private readonly ToolStripMenuItem _exitMenuItem;
         private readonly ToolStripMenuItem _aihotMenuItem;
         private readonly ToolStripMenuItem _aihotBlinkMenuItem;
+        private readonly ToolStripMenuItem _resetWidgetPositionMenuItem;
         private readonly AppSettings _settings;
         private Icon _currentIcon;
         private Rectangle _lastTrayAnchor;
@@ -63,6 +67,7 @@ namespace CodexQuotaTray
 
             _widget = new TaskbarWidgetForm();
             _widget.ApplySettings(_settings);
+            _widget.ManualPositionChanged += delegate { ApplySettingsChange(); };
             _lastTrayAnchor = new Rectangle(Cursor.Position.X - 1, Cursor.Position.Y - 1, 3, 3);
             _widget.Click += delegate { AcknowledgeCompletionReminder(); TogglePopup(_widget.GetAnchorBounds()); };
 
@@ -84,11 +89,20 @@ namespace CodexQuotaTray
                 ApplySettingsChange();
             };
             _exitMenuItem = new ToolStripMenuItem();
+            _resetWidgetPositionMenuItem = new ToolStripMenuItem();
+            _resetWidgetPositionMenuItem.Click += delegate
+            {
+                _settings.WidgetManualPosition = false;
+                _settings.WidgetPositionRatio = 0.5;
+                ApplySettingsChange();
+                _widget.RefreshDynamicAnchor();
+            };
             _exitMenuItem.Click += delegate { ExitThread(); };
             menu.Items.Add(_showMenuItem);
             menu.Items.Add(_refreshMenuItem);
             menu.Items.Add(_aihotMenuItem);
             menu.Items.Add(_aihotBlinkMenuItem);
+            menu.Items.Add(_resetWidgetPositionMenuItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(_exitMenuItem);
             _widget.ContextMenuStrip = menu;
@@ -121,11 +135,35 @@ namespace CodexQuotaTray
             _aihotBlinkTimer.Tick += delegate { _aihotBlink.Tick(); };
             _aihotBlinkTimer.Start();
 
+            _anchorRefreshTimer = new Timer { Interval = 400 };
+            _anchorRefreshTimer.Tick += delegate
+            {
+                _anchorRefreshTimer.Stop();
+                _lastAnchorRefreshUtc = DateTime.UtcNow;
+                _widget.RefreshDynamicAnchor();
+            };
+            _desktopWatcher = new DesktopWindowWatcher();
+            _desktopWatcher.Changed += delegate(bool anchorChanged)
+            {
+                if (_widget.IsDisposed) return;
+                RefreshOverlayFullscreenState();
+                if (anchorChanged && !_settings.WidgetManualPosition && !_overlaySuppressedByFullscreen)
+                {
+                    _anchorRefreshTimer.Stop();
+                    _anchorRefreshTimer.Start();
+                }
+            };
+
             _widgetGuardTimer = new Timer { Interval = 1000 };
             _widgetGuardTimer.Tick += delegate
             {
                 RefreshOverlayFullscreenState();
                 if (!_overlaySuppressedByFullscreen && _settings.WidgetVisible) _widget.EnsureOnTop();
+                if (!_overlaySuppressedByFullscreen && !_settings.WidgetManualPosition && DateTime.UtcNow - _lastAnchorRefreshUtc >= TimeSpan.FromSeconds(20))
+                {
+                    _lastAnchorRefreshUtc = DateTime.UtcNow;
+                    _widget.RefreshDynamicAnchor();
+                }
                 var systemLight = ThemePalette.SystemUsesLightAppearance();
                 if (string.Equals(_settings.AppearanceMode, "system", StringComparison.OrdinalIgnoreCase) &&
                     systemLight != _lastSystemLightAppearance)
@@ -156,12 +194,14 @@ namespace CodexQuotaTray
         /// </summary>
         private void RefreshOverlayFullscreenState()
         {
+            var wasSuppressed = _overlaySuppressedByFullscreen;
             var suppressed = false;
             try { suppressed = FullscreenDetector.IsFullscreenOnWidgetMonitor(GetWidgetHandle()); }
             catch { suppressed = false; }
             _overlaySuppressedByFullscreen = suppressed;
             _widget.SetOverlaySuppressed(suppressed);
             _aihotBlink.SetSuppressed(suppressed);
+            if (wasSuppressed && !suppressed && _settings.WidgetVisible) _widget.EnsureOnTop();
         }
 
         private IntPtr GetWidgetHandle()
@@ -212,6 +252,7 @@ namespace CodexQuotaTray
             _aihotMenuItem.Text = T("AIHOT · Codex 重置", "AIHOT · Codex resets");
             _aihotBlinkMenuItem.Text = T("AIHOT 新通知闪烁提醒", "Blink on new AIHOT resets");
             _aihotBlinkMenuItem.Checked = _settings.AihotBlinkEnabled;
+            _resetWidgetPositionMenuItem.Text = T("重置悬浮窗位置", "Reset widget position");
             _exitMenuItem.Text = T("退出", "Quit");
         }
 
@@ -505,6 +546,9 @@ namespace CodexQuotaTray
 
         protected override void ExitThreadCore()
         {
+            _desktopWatcher.Dispose();
+            _anchorRefreshTimer.Stop();
+            _anchorRefreshTimer.Dispose();
             _refreshTimer.Stop();
             _refreshTimer.Dispose();
             _widgetGuardTimer.Stop();

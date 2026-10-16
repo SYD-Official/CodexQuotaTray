@@ -1,6 +1,8 @@
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Diagnostics;
+using System.IO;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -74,6 +76,13 @@ namespace CodexQuotaTray
         private bool _hasRefreshedTaskButtonBounds;
         private bool _hasRefreshedNotificationBounds;
         private int _dynamicAnchorRefreshRunning;
+        private bool _dragTracking;
+        private bool _dragging;
+        private bool _suppressClick;
+        private Point _dragOrigin;
+        private Point _dragWindowOrigin;
+        private double _dragRatio;
+        public event Action ManualPositionChanged;
 
         public TaskbarWidgetForm()
         {
@@ -158,6 +167,7 @@ namespace CodexQuotaTray
             _overlaySuppressed = suppressed;
             if (suppressed)
             {
+                CancelDrag();
                 try { if (Visible) Hide(); }
                 catch { }
             }
@@ -182,23 +192,23 @@ namespace CodexQuotaTray
 
         public void RefreshDynamicAnchor()
         {
+            if (_settings.WidgetManualPosition || _dragging || _overlaySuppressed || IsDisposed) return;
             if (Interlocked.Exchange(ref _dynamicAnchorRefreshRunning, 1) != 0) return;
             var thread = new Thread(new ThreadStart(delegate
             {
                 try
                 {
-                    var taskbar = FindWindow("Shell_TrayWnd", null);
-                    NativeRect taskbarBounds;
-                    if (taskbar == IntPtr.Zero || !GetWindowRect(taskbar, out taskbarBounds)) return;
-                    var horizontal = taskbarBounds.Right - taskbarBounds.Left >= taskbarBounds.Bottom - taskbarBounds.Top;
+                    IntPtr taskbar;
                     NativeRect refreshedTaskButtons;
                     NativeRect refreshedNotifications;
-                    var hasTaskButtons = TryGetTaskButtonBounds(taskbar, taskbarBounds, horizontal, out refreshedTaskButtons);
-                    var hasNotifications = TryGetVisibleNotificationBounds(taskbar, taskbarBounds, horizontal, out refreshedNotifications);
+                    bool hasTaskButtons, hasNotifications;
+                    if (!ReadFreshAnchor(out taskbar, out refreshedTaskButtons, out hasTaskButtons,
+                        out refreshedNotifications, out hasNotifications)) return;
                     if (!hasTaskButtons && !hasNotifications) return;
                     if (IsDisposed || !IsHandleCreated) return;
                     BeginInvoke(new Action(delegate
                     {
+                        if (IsDisposed || _settings.WidgetManualPosition || _dragging || _overlaySuppressed) return;
                         _refreshedTaskbarHandle = taskbar;
                         if (hasTaskButtons)
                         {
@@ -214,11 +224,67 @@ namespace CodexQuotaTray
                     }));
                 }
                 catch (InvalidOperationException) { }
+                catch (System.ComponentModel.Win32Exception) { }
+                catch (IOException) { }
                 finally { Interlocked.Exchange(ref _dynamicAnchorRefreshRunning, 0); }
             }));
             thread.IsBackground = true;
             thread.SetApartmentState(ApartmentState.MTA);
             thread.Start();
+        }
+
+        // A fresh UIA client process avoids stale provider geometry retained by the
+        // long-lived tray process. This helper uses the same EXE, with bounded lifetime.
+        public static void WriteAnchorProbeResult()
+        {
+            var taskbar = FindWindow("Shell_TrayWnd", null);
+            NativeRect bounds;
+            if (taskbar == IntPtr.Zero || !GetWindowRect(taskbar, out bounds)) return;
+            var horizontal = bounds.Right - bounds.Left >= bounds.Bottom - bounds.Top;
+            NativeRect buttons, notifications;
+            var hasButtons = TryGetTaskButtonBounds(taskbar, bounds, horizontal, out buttons);
+            var hasNotifications = TryGetVisibleNotificationBounds(taskbar, bounds, horizontal, out notifications);
+            Console.WriteLine(string.Join("|", new[] { "CQT_ANCHOR_V1", taskbar.ToInt64().ToString(CultureInfo.InvariantCulture),
+                hasButtons ? "1" : "0", buttons.Left.ToString(CultureInfo.InvariantCulture), buttons.Top.ToString(CultureInfo.InvariantCulture),
+                buttons.Right.ToString(CultureInfo.InvariantCulture), buttons.Bottom.ToString(CultureInfo.InvariantCulture),
+                hasNotifications ? "1" : "0", notifications.Left.ToString(CultureInfo.InvariantCulture), notifications.Top.ToString(CultureInfo.InvariantCulture),
+                notifications.Right.ToString(CultureInfo.InvariantCulture), notifications.Bottom.ToString(CultureInfo.InvariantCulture) }));
+        }
+
+        private static bool ReadFreshAnchor(out IntPtr taskbar, out NativeRect buttons, out bool hasButtons,
+            out NativeRect notifications, out bool hasNotifications)
+        {
+            taskbar = IntPtr.Zero;
+            buttons = notifications = new NativeRect();
+            hasButtons = hasNotifications = false;
+            using (var probe = new Process())
+            {
+                probe.StartInfo = new ProcessStartInfo(Application.ExecutablePath, "--anchor-probe")
+                {
+                    UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true
+                };
+                probe.Start();
+                if (!probe.WaitForExit(2500))
+                {
+                    try { probe.Kill(); probe.WaitForExit(500); } catch { }
+                    return false;
+                }
+                if (probe.ExitCode != 0) return false;
+                var fields = probe.StandardOutput.ReadToEnd().Trim().Split('|');
+                if (fields.Length != 12 || fields[0] != "CQT_ANCHOR_V1") return false;
+                long handle;
+                if (!long.TryParse(fields[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out handle)) return false;
+                var values = new int[10];
+                for (var i = 0; i < values.Length; i++)
+                    if (!int.TryParse(fields[i + 2], NumberStyles.Integer, CultureInfo.InvariantCulture, out values[i])) return false;
+                taskbar = new IntPtr(handle);
+                if (taskbar != FindWindow("Shell_TrayWnd", null)) return false;
+                hasButtons = values[0] == 1;
+                buttons = new NativeRect { Left = values[1], Top = values[2], Right = values[3], Bottom = values[4] };
+                hasNotifications = values[5] == 1;
+                notifications = new NativeRect { Left = values[6], Top = values[7], Right = values[8], Bottom = values[9] };
+                return true;
+            }
         }
 
         public Rectangle GetAnchorBounds()
@@ -234,7 +300,7 @@ namespace CodexQuotaTray
 
         public void Reposition(bool forceZOrder = false)
         {
-            if (_overlaySuppressed) return;
+            if (_overlaySuppressed || _dragging) return;
             var taskbar = FindWindow("Shell_TrayWnd", null);
             NativeRect taskbarBounds;
             if (taskbar == IntPtr.Zero || !GetWindowRect(taskbar, out taskbarBounds))
@@ -251,19 +317,11 @@ namespace CodexQuotaTray
                 IntersectsTaskbar(_refreshedNotificationBounds, taskbarBounds);
             var trayBounds = hasTray ? _refreshedNotificationBounds : new NativeRect();
             if (!hasTray) hasTray = tray != IntPtr.Zero && GetWindowRect(tray, out trayBounds);
-            NativeRect visibleNotificationBounds;
-            if (!hasTray &&
-                TryGetVisibleNotificationBounds(taskbar, taskbarBounds, taskbarWidth >= taskbarHeight, out visibleNotificationBounds))
-            {
-                trayBounds = visibleNotificationBounds;
-                hasTray = true;
-            }
             NativeRect taskButtonBounds;
             var hasTaskButtons = _hasRefreshedTaskButtonBounds && _refreshedTaskbarHandle == taskbar &&
                 IntersectsTaskbar(_refreshedTaskButtonBounds, taskbarBounds);
             taskButtonBounds = hasTaskButtons ? _refreshedTaskButtonBounds : new NativeRect();
-            if (!hasTaskButtons)
-                hasTaskButtons = TryGetTaskButtonBounds(taskbar, taskbarBounds, taskbarWidth >= taskbarHeight, out taskButtonBounds);
+            // UIA reads are asynchronous. Never block the UI/fullscreen timer here.
 
             int x;
             int y;
@@ -276,6 +334,8 @@ namespace CodexQuotaTray
                 y = taskbarBounds.Top + Math.Max(0, (taskbarHeight - Height) / 2) + Math.Max(1, (int)Math.Round(_dpiScale));
                 y = Math.Min(y, taskbarBounds.Bottom - Height - 1);
                 x = Math.Max(taskbarBounds.Left + 4, Math.Min(x, taskbarBounds.Right - Width - 4));
+                if (_settings.WidgetManualPosition)
+                    x = WidgetPlacement.Coordinate(taskbarBounds.Left, taskbarBounds.Right, Width, _settings.WidgetPositionRatio);
             }
             else
             {
@@ -285,6 +345,8 @@ namespace CodexQuotaTray
                     ? CalculateLeadingPlacement(taskbarBounds.Top, taskbarBounds.Bottom, Height, taskButtonBounds.Top, 8)
                     : (hasTray ? trayBounds.Top - Height - 8 : taskbarBounds.Bottom - Height - 190);
                 y = Math.Max(taskbarBounds.Top + 4, Math.Min(y, taskbarBounds.Bottom - Height - 4));
+                if (_settings.WidgetManualPosition)
+                    y = WidgetPlacement.Coordinate(taskbarBounds.Top, taskbarBounds.Bottom, Height, _settings.WidgetPositionRatio);
             }
 
             NativeRect currentBounds;
@@ -467,6 +529,97 @@ namespace CodexQuotaTray
             base.OnMouseEnter(e);
             _hovered = true;
             Invalidate();
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            _suppressClick = false;
+            if (e.Button == MouseButtons.Left && !_overlaySuppressed)
+            {
+                _dragOrigin = Cursor.Position;
+                _dragWindowOrigin = Location;
+                _dragTracking = true;
+                Capture = true;
+            }
+            base.OnMouseDown(e);
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            if (_dragTracking && Capture && (e.Button & MouseButtons.Left) != 0 && !_overlaySuppressed)
+            {
+                var cursor = Cursor.Position;
+                if (!_dragging && WidgetPlacement.StartsDrag(_dragOrigin, cursor, SystemInformation.DragSize))
+                {
+                    _dragging = true;
+                    _suppressClick = true;
+                    Cursor = Cursors.SizeAll;
+                }
+                if (_dragging)
+                {
+                    NativeRect taskbar;
+                    if (GetWindowRect(FindWindow("Shell_TrayWnd", null), out taskbar))
+                    {
+                        var horizontal = taskbar.Right - taskbar.Left >= taskbar.Bottom - taskbar.Top;
+                        var coordinate = horizontal ? _dragWindowOrigin.X + cursor.X - _dragOrigin.X : _dragWindowOrigin.Y + cursor.Y - _dragOrigin.Y;
+                        _dragRatio = horizontal
+                            ? WidgetPlacement.Ratio(coordinate, taskbar.Left, taskbar.Right, Width)
+                            : WidgetPlacement.Ratio(coordinate, taskbar.Top, taskbar.Bottom, Height);
+                        var x = horizontal ? WidgetPlacement.Coordinate(taskbar.Left, taskbar.Right, Width, _dragRatio) : Left;
+                        var y = horizontal ? Top : WidgetPlacement.Coordinate(taskbar.Top, taskbar.Bottom, Height, _dragRatio);
+                        SetWindowPos(Handle, IntPtr.Zero, x, y, 0, 0, 0x0015); // no size/z-order/activation
+                    }
+                }
+            }
+            base.OnMouseMove(e);
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left && _dragTracking)
+            {
+                var moved = _dragging;
+                _dragTracking = false;
+                _dragging = false;
+                Capture = false;
+                Cursor = Cursors.Hand;
+                if (moved && !_overlaySuppressed)
+                {
+                    _settings.WidgetManualPosition = true;
+                    _settings.WidgetPositionRatio = _dragRatio;
+                    var handler = ManualPositionChanged;
+                    if (handler != null) handler();
+                    Reposition();
+                }
+            }
+            base.OnMouseUp(e);
+        }
+
+        protected override void OnClick(EventArgs e)
+        {
+            if (!_suppressClick && !_dragging) base.OnClick(e);
+        }
+
+        protected override void OnMouseCaptureChanged(EventArgs e)
+        {
+            if (!Capture && _dragTracking) CancelDrag();
+            base.OnMouseCaptureChanged(e);
+        }
+
+        protected override void OnVisibleChanged(EventArgs e)
+        {
+            if (!Visible) CancelDrag();
+            base.OnVisibleChanged(e);
+        }
+
+        private void CancelDrag()
+        {
+            if (!_dragTracking) return;
+            _dragTracking = false;
+            _dragging = false;
+            Capture = false;
+            Cursor = Cursors.Hand;
+            if (IsHandleCreated && !IsDisposed) Reposition();
         }
 
         protected override void OnMouseLeave(EventArgs e)

@@ -43,6 +43,7 @@ $testSources = @(
     "$projectRoot\src\AihotService.cs",
     "$projectRoot\src\AihotBlinkController.cs",
     "$projectRoot\src\FullscreenDetector.cs",
+    "$projectRoot\src\WidgetPlacement.cs",
     "$projectRoot\src\ThemePalette.cs",
     "$projectRoot\tests\ParserTests.cs"
 )
@@ -55,6 +56,7 @@ $previewSources = @(
     "$projectRoot\src\LayeredTextOverlay.cs",
     "$projectRoot\src\AppSettings.cs",
     "$projectRoot\src\Models.cs",
+    "$projectRoot\src\WidgetPlacement.cs",
     "$projectRoot\src\SessionQuotaReader.cs",
     "$projectRoot\src\AihotService.cs",
     "$projectRoot\src\UpdateService.cs",
